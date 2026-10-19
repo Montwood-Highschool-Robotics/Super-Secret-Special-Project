@@ -1,5 +1,9 @@
 
 package org.firstinspires.ftc.teamcode.TeleOps;
+
+import com.qualcomm.robotcore.hardware.DcMotor;
+import com.qualcomm.robotcore.hardware.Servo;
+import com.qualcomm.robotcore.hardware.CRServo;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import java.io.FileOutputStream;
@@ -9,7 +13,7 @@ import java.util.ArrayList;
 
 @TeleOp
 public class TeleOpRecorderRevival extends LinearOpMode {
-    // A lightweight inner class to hold static snapshots of the FTC Gamepad
+    
     public static class GamepadSnapshot implements Serializable {
         private static final long serialVersionUID = 1L;
 
@@ -43,13 +47,12 @@ public class TeleOpRecorderRevival extends LinearOpMode {
     }
 
     private ArrayList<GamepadSnapshot> recordedFrames = new ArrayList<>();
-    // Path to save on the Control Hub internal storage
+    // Path to save on the Control Hub internal storage enter when you know what it is
     private final String FILE_PATH = "/sdcard/FIRST/recorded_input.dat";
 
     @Override
     public void runOpMode() {
-        // Initialize your hardware maps here (e.g., drive motors)
-        // SampleHardware robot = new SampleHardware(hardwareMap);
+        // Initialize your hardware maps here (ex. drive motors)
 
         telemetry.addData("Status", "Ready. Press Play to start recording.");
         telemetry.update();
