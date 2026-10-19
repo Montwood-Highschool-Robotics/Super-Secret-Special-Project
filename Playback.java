@@ -1,10 +1,12 @@
 package org.firstinspires.ftc.teamcode.Autos;
 
+
+import com.qualcomm.robotcore.hardware.DcMotor;
+import com.qualcomm.robotcore.hardware.Servo;
+import com.qualcomm.robotcore.hardware.CRServo;
 import com.qualcomm.robotcore.eventloop.opmode.Autonomous;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
-
 import org.firstinspires.ftc.teamcode.TeleOps.TeleOpRecorderRevival;
-
 import java.io.FileInputStream;
 import java.io.ObjectInputStream;
 import java.util.ArrayList;
@@ -13,12 +15,13 @@ import java.util.ArrayList;
 public class  Playback extends LinearOpMode {
 
     private ArrayList<TeleOpRecorderRevival.GamepadSnapshot> playlist;
+    // Same File Path as the TeleOpRecorderRevival 
     private final String FILE_PATH = "/sdcard/FIRST/recorded_input.dat";
 
     @Override
     public void runOpMode() {
         // Initialize your hardware maps here (Exactly identical to your recorder layout)
-        // SampleHardware robot = new SampleHardware(hardwareMap);
+       
 
         telemetry.addData("Status", "Loading recording file...");
         telemetry.update();
