@@ -55,7 +55,6 @@ public class TeleOpRecorderRevival extends LinearOpMode {
         while (opModeIsActive() && timer.seconds() < RECORD_SECONDS) {
             double t = timer.seconds();
 
-            // Same mixing as your original code
             double y = gamepad1.left_stick_y;
             double x = gamepad1.left_stick_x;
             double rx = gamepad1.right_stick_x * 0.8;
