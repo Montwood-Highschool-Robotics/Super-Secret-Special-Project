@@ -1,12 +1,15 @@
-package org.firstinspires.ftc.teamcode.Autos;
+package org.firstinspires.ftc.teamcode;
 
 import com.qualcomm.robotcore.eventloop.opmode.Autonomous;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
+import com.qualcomm.robotcore.hardware.CRServo;
 import com.qualcomm.robotcore.hardware.DcMotor;
+import com.qualcomm.robotcore.hardware.DcMotorSimple;
+import com.qualcomm.robotcore.hardware.Servo;
 import com.qualcomm.robotcore.hardware.VoltageSensor;
 import com.qualcomm.robotcore.util.ElapsedTime;
 
-import org.firstinspires.ftc.teamcode.TeleOps.TeleOpRecorderRevival;
+import org.firstinspires.ftc.teamcode.TeleRecord;
 
 import java.io.BufferedReader;
 import java.io.FileReader;
@@ -20,7 +23,8 @@ import java.util.ArrayList;
 @Autonomous(name = "Playback Recorded Drive", group = "Record")
 public class Playback extends LinearOpMode {
 
-    private DcMotor FLW, BLW, FRW, BRW;
+    private DcMotor FLW, BLW, FRW, BRW,LeftShoot,RightShoot,Intake;
+    private Servo Angle1,Angle2,FlowerR,FlowerL;
 
     private final ArrayList<double[]> frames = new ArrayList<>();
     private double recordedVoltage = 12.0;
@@ -32,11 +36,27 @@ public class Playback extends LinearOpMode {
         BLW = hardwareMap.dcMotor.get("BLW");
         FRW = hardwareMap.dcMotor.get("FRW");
         BRW = hardwareMap.dcMotor.get("BRW");
+        LeftShoot = hardwareMap.dcMotor.get("LeftShoot");
+        RightShoot = hardwareMap.dcMotor.get("RightShoot");
+        Intake = hardwareMap.dcMotor.get("Intake");
+        Servo Angle1 = hardwareMap.servo.get("Angle1");
+        Servo Angle2 = hardwareMap.servo.get("Angle2");
+        Servo FlowerR = hardwareMap.servo.get("FlowerR");
+        Servo FlowerL = hardwareMap.servo.get("FlowerL");
+        CRServo Stopper = hardwareMap.crservo.get("Stopper");
+
 
         // Motor directions must match TeleRecord
-        for (DcMotor m : new DcMotor[]{FLW, BLW, FRW, BRW}) {
+        for (DcMotor m : new DcMotor[]{FLW, BLW, FRW, BRW,LeftShoot,RightShoot,Intake}) {
             m.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
             m.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+            FLW.setDirection(DcMotorSimple.Direction.REVERSE);
+            // BRW.setDirection(DcMotorSimple.Direction.REVERSE);
+            BLW.setDirection(DcMotorSimple.Direction.REVERSE);
+
+        }
+        for (Servo s : new Servo[]{Angle1,Angle2,FlowerR,FlowerL}){
+
         }
 
         boolean loaded = loadRecording();
@@ -81,7 +101,7 @@ public class Playback extends LinearOpMode {
     }
 
     private boolean loadRecording() {
-        try (BufferedReader r = new BufferedReader(new FileReader(TeleOpRecorderRevival.FILE_PATH))) {
+        try (BufferedReader r = new BufferedReader(new FileReader(TeleRecord.FILE_PATH))) {
             String line;
             while ((line = r.readLine()) != null) {
                 line = line.trim();
