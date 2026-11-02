@@ -16,9 +16,10 @@ import java.util.ArrayList;
 import java.util.Locale;
 
 /**
- * Drive normally for up to 30 seconds. Every loop the wheel powers are logged
- * with a timestamp. When the 30 s are up (or you press START on gamepad1)
- * the log is saved to a CSV file that the Playback OpMode replays.
+ * Drive normally (gamepad1 = drive, gamepad2 = mechanisms) for up to 30 seconds.
+ * Every loop the wheel powers AND mechanism outputs are logged with a timestamp.
+ * When the 30 s are up (or you press START on gamepad1) the log is saved to a
+ * CSV file that the Playback OpMode replays.
  */
 @TeleOp(name = "Record Drive (30s)", group = "Record")
 public class TeleRecord extends LinearOpMode {
@@ -26,12 +27,34 @@ public class TeleRecord extends LinearOpMode {
     public static final String FILE_PATH = "/sdcard/FIRST/recorded_drive.csv";
     public static final double RECORD_SECONDS = 30.0;
 
-    private DcMotor FLW ,BLW, FRW, BRW,LeftShoot,RightShoot,Intake;
-    private Servo Angle1,Angle2,FlowerR,FlowerL;
+    // CSV column layout (shared with Playback)
+    public static final int T = 0;
+    public static final int FL = 1, BL = 2, FR = 3, BR = 4;
+    public static final int L_SHOOT = 5, R_SHOOT = 6;
+    public static final int INTAKE = 7, STOPPER = 8;
+    public static final int ANGLE1 = 9, ANGLE2 = 10;
+    public static final int FLOWER_R = 11, FLOWER_L = 12;
+    public static final int COLUMNS = 13;
+
+    private DcMotor FLW, BLW, FRW, BRW, LeftShoot, RightShoot, Intake;
+    private Servo Angle1, Angle2, FlowerR, FlowerL;
     private CRServo Stopper;
 
-    // One row per loop: time (s) and the four wheel powers
     private final ArrayList<double[]> frames = new ArrayList<>();
+
+    /**
+     * Single source of truth for motor modes/directions. Playback calls this
+     * too, so the two OpModes can never get out of sync.
+     */
+    public static void configureMotors(DcMotor FLW, DcMotor BLW, DcMotor FRW, DcMotor BRW,
+                                       DcMotor LeftShoot, DcMotor RightShoot, DcMotor Intake) {
+        for (DcMotor m : new DcMotor[]{FLW, BLW, FRW, BRW, LeftShoot, RightShoot, Intake}) {
+            m.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
+            m.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        }
+        FRW.setDirection(DcMotorSimple.Direction.REVERSE);
+        BRW.setDirection(DcMotorSimple.Direction.REVERSE);
+    }
 
     @Override
     public void runOpMode() {
@@ -42,33 +65,16 @@ public class TeleRecord extends LinearOpMode {
         LeftShoot = hardwareMap.dcMotor.get("LeftShoot");
         RightShoot = hardwareMap.dcMotor.get("RightShoot");
         Intake = hardwareMap.dcMotor.get("Intake");
-        Servo Angle1 = hardwareMap.servo.get("Angle1");
-        Servo Angle2 = hardwareMap.servo.get("Angle2");
-        Servo FlowerR = hardwareMap.servo.get("FlowerR");
-        Servo FlowerL = hardwareMap.servo.get("FlowerL");
-        CRServo Stopper = hardwareMap.crservo.get("Stopper");
+        Angle1 = hardwareMap.servo.get("Angle1");
+        Angle2 = hardwareMap.servo.get("Angle2");
+        FlowerR = hardwareMap.servo.get("FlowerR");
+        FlowerL = hardwareMap.servo.get("FlowerL");
+        Stopper = hardwareMap.crservo.get("Stopper");
 
-
-
-
-        // If your robot needs reversed motors, set them here AND in Playback
-        // (they must match), e.g. FLW.setDirection(DcMotor.Direction.REVERSE);
-
-        for (DcMotor m : new DcMotor[]{FLW, BLW, FRW, BRW,LeftShoot,RightShoot,Intake}) {
-            m.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
-            m.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
-            BRW.setDirection(DcMotorSimple.Direction.REVERSE);
-            // BRW.setDirection(DcMotorSimple.Direction.REVERSE);
-            FRW.setDirection(DcMotorSimple.Direction.REVERSE);
-        }
-        for (Servo s : new Servo[]{Angle1,Angle2,FlowerR,FlowerL}){
-
-        }
-
-
+        configureMotors(FLW, BLW, FRW, BRW, LeftShoot, RightShoot, Intake);
 
         telemetry.addData("Status", "Ready. Press PLAY - recording starts immediately.");
-        telemetry.addData("Length", "%.0f seconds (START button ends early)", RECORD_SECONDS);
+        telemetry.addData("Length", "%.0f seconds (START on gamepad1 ends early)", RECORD_SECONDS);
         telemetry.update();
 
         waitForStart();
@@ -76,9 +82,15 @@ public class TeleRecord extends LinearOpMode {
         double batteryVoltage = getBatteryVoltage();
         ElapsedTime timer = new ElapsedTime();
 
+        // Servos hold their last commanded position. NaN = "not commanded yet",
+        // which Playback treats as "leave this servo alone".
+        double angle1Pos = Double.NaN, angle2Pos = Double.NaN;
+        double flowerRPos = Double.NaN, flowerLPos = Double.NaN;
+
         while (opModeIsActive() && timer.seconds() < RECORD_SECONDS) {
             double t = timer.seconds();
 
+            // ---- Drive (gamepad1) ----
             double y = gamepad1.left_stick_y;
             double x = gamepad1.left_stick_x;
             double rx = gamepad1.right_stick_x * 0.8;
@@ -93,59 +105,83 @@ public class TeleRecord extends LinearOpMode {
             BLW.setPower(bl);
             FRW.setPower(fr);
             BRW.setPower(br);
+
+            // ---- Shooter ----
+            double shootPower;
             if (gamepad2.dpad_up) {
-                LeftShoot.setPower(0.5);
-                RightShoot.setPower(0.5);
-
-            }else if (gamepad2.dpad_down){
-                LeftShoot.setPower(-.5);
-                RightShoot.setPower(-0.5);
-            }else {
-
-                LeftShoot.setPower(0);
-                RightShoot.setPower(0);
+                shootPower = 0.5;
+            } else if (gamepad2.dpad_down) {
+                shootPower = -0.5;
+            } else {
+                shootPower = 0;
             }
+            LeftShoot.setPower(shootPower);
+            RightShoot.setPower(shootPower);
 
-
-            //Intake
-            if (gamepad2.triangle){
-                Intake.setPower(-1);
-            }else if (gamepad2.square){
-                Intake.setPower(1);
-            }else {
-                Intake.setPower(0);
+            // ---- Intake ----
+            double intakePower;
+            if (gamepad2.triangle) {
+                intakePower = -1;
+            } else if (gamepad2.square) {
+                intakePower = 1;
+            } else {
+                intakePower = 0;
             }
+            Intake.setPower(intakePower);
 
-
-            //Angle
-            if (gamepad2.right_bumper){
-                Angle1.setPosition(.5);
-                Angle2.setPosition(0);
+            // ---- Angle ----
+            if (gamepad2.right_bumper) {
+                angle1Pos = 0.5;
+                angle2Pos = 0;
+                Angle1.setPosition(angle1Pos);
+                Angle2.setPosition(angle2Pos);
             } else if (gamepad2.left_bumper) {
-                Angle1.setPosition(0);
-                Angle2.setPosition(0.5);
+                angle1Pos = 0;
+                angle2Pos = 0.5;
+                Angle1.setPosition(angle1Pos);
+                Angle2.setPosition(angle2Pos);
             }
 
-            //Flower Ramp Mech
-
-            if (gamepad2.right_trigger > 0.1){
-                FlowerR.setPosition(1);
-                FlowerL.setPosition(0);
+            // ---- Flower ramp ----
+            if (gamepad2.right_trigger > 0.1) {
+                flowerRPos = 1;
+                flowerLPos = 0;
+                FlowerR.setPosition(flowerRPos);
+                FlowerL.setPosition(flowerLPos);
             } else if (gamepad2.left_trigger > 0.1) {
-                FlowerR.setPosition(0);
-                FlowerL.setPosition(1);
+                flowerRPos = 0;
+                flowerLPos = 1;
+                FlowerR.setPosition(flowerRPos);
+                FlowerL.setPosition(flowerLPos);
             }
 
-            if (gamepad2.square){
-                Stopper.setPower(1);
+            // ---- Stopper (continuous servo) ----
+            double stopperPower;
+            if (gamepad2.square) {
+                stopperPower = 1;
             } else if (gamepad2.cross) {
-                Stopper.setPower(-1);
-            } else{
-                Stopper.setPower(0);
+                stopperPower = -1;
+            } else {
+                stopperPower = 0;
             }
+            Stopper.setPower(stopperPower);
 
-
-            frames.add(new double[]{t, fl, bl, fr, br});
+            // ---- Log everything ----
+            double[] frame = new double[COLUMNS];
+            frame[T] = t;
+            frame[FL] = fl;
+            frame[BL] = bl;
+            frame[FR] = fr;
+            frame[BR] = br;
+            frame[L_SHOOT] = shootPower;
+            frame[R_SHOOT] = shootPower;
+            frame[INTAKE] = intakePower;
+            frame[STOPPER] = stopperPower;
+            frame[ANGLE1] = angle1Pos;
+            frame[ANGLE2] = angle2Pos;
+            frame[FLOWER_R] = flowerRPos;
+            frame[FLOWER_L] = flowerLPos;
+            frames.add(frame);
 
             if (gamepad1.start) break;
 
@@ -156,15 +192,19 @@ public class TeleRecord extends LinearOpMode {
             sleep(10);
         }
 
-        stopDrive();
-        saveRecording(batteryVoltage, frames.isEmpty() ? 0 : frames.get(frames.size() - 1)[0]);
+        stopAll();
+        saveRecording(batteryVoltage, frames.isEmpty() ? 0 : frames.get(frames.size() - 1)[T]);
     }
 
-    private void stopDrive() {
+    private void stopAll() {
         FLW.setPower(0);
         BLW.setPower(0);
         FRW.setPower(0);
         BRW.setPower(0);
+        LeftShoot.setPower(0);
+        RightShoot.setPower(0);
+        Intake.setPower(0);
+        Stopper.setPower(0);
     }
 
     private double getBatteryVoltage() {
@@ -188,8 +228,13 @@ public class TeleRecord extends LinearOpMode {
                 // Header: voltage at record time, total duration
                 w.write(String.format(Locale.US, "#%.3f,%.3f%n", voltage, duration));
                 for (double[] f : frames) {
-                    w.write(String.format(Locale.US, "%.4f,%.4f,%.4f,%.4f,%.4f%n",
-                            f[0], f[1], f[2], f[3], f[4]));
+                    StringBuilder sb = new StringBuilder();
+                    for (int i = 0; i < f.length; i++) {
+                        if (i > 0) sb.append(',');
+                        sb.append(String.format(Locale.US, "%.4f", f[i])); // NaN -> "NaN"
+                    }
+                    w.write(sb.toString());
+                    w.newLine();
                 }
             }
             telemetry.addData("Success", "Saved %d frames (%.1f s)", frames.size(), duration);
