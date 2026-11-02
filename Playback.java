@@ -4,27 +4,27 @@ import com.qualcomm.robotcore.eventloop.opmode.Autonomous;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.hardware.CRServo;
 import com.qualcomm.robotcore.hardware.DcMotor;
-import com.qualcomm.robotcore.hardware.DcMotorSimple;
 import com.qualcomm.robotcore.hardware.Servo;
 import com.qualcomm.robotcore.hardware.VoltageSensor;
 import com.qualcomm.robotcore.util.ElapsedTime;
-
-import org.firstinspires.ftc.teamcode.TeleRecord;
 
 import java.io.BufferedReader;
 import java.io.FileReader;
 import java.util.ArrayList;
 
+import static org.firstinspires.ftc.teamcode.TeleRecord.*;
+
 /**
- * Replays the wheel powers recorded by TeleRecord, on the same timeline.
- * Powers are scaled by (recorded battery voltage / current battery voltage)
- * so a different battery charge doesn't change how far the robot travels.
+ * Replays everything recorded by TeleRecord (drive + mechanisms) on the same timeline.
+ * Drive and shooter powers are scaled by (recorded battery voltage / current voltage)
+ * so a different battery charge doesn't change the result as much.
  */
 @Autonomous(name = "Playback Recorded Drive", group = "Record")
 public class Playback extends LinearOpMode {
 
-    private DcMotor FLW, BLW, FRW, BRW,LeftShoot,RightShoot,Intake;
-    private Servo Angle1,Angle2,FlowerR,FlowerL;
+    private DcMotor FLW, BLW, FRW, BRW, LeftShoot, RightShoot, Intake;
+    private Servo Angle1, Angle2, FlowerR, FlowerL;
+    private CRServo Stopper;
 
     private final ArrayList<double[]> frames = new ArrayList<>();
     private double recordedVoltage = 12.0;
@@ -39,25 +39,14 @@ public class Playback extends LinearOpMode {
         LeftShoot = hardwareMap.dcMotor.get("LeftShoot");
         RightShoot = hardwareMap.dcMotor.get("RightShoot");
         Intake = hardwareMap.dcMotor.get("Intake");
-        Servo Angle1 = hardwareMap.servo.get("Angle1");
-        Servo Angle2 = hardwareMap.servo.get("Angle2");
-        Servo FlowerR = hardwareMap.servo.get("FlowerR");
-        Servo FlowerL = hardwareMap.servo.get("FlowerL");
-        CRServo Stopper = hardwareMap.crservo.get("Stopper");
+        Angle1 = hardwareMap.servo.get("Angle1");
+        Angle2 = hardwareMap.servo.get("Angle2");
+        FlowerR = hardwareMap.servo.get("FlowerR");
+        FlowerL = hardwareMap.servo.get("FlowerL");
+        Stopper = hardwareMap.crservo.get("Stopper");
 
-
-        // Motor directions must match TeleRecord
-        for (DcMotor m : new DcMotor[]{FLW, BLW, FRW, BRW,LeftShoot,RightShoot,Intake}) {
-            m.setMode(DcMotor.RunMode.RUN_WITHOUT_ENCODER);
-            m.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
-            FLW.setDirection(DcMotorSimple.Direction.REVERSE);
-            // BRW.setDirection(DcMotorSimple.Direction.REVERSE);
-            BLW.setDirection(DcMotorSimple.Direction.REVERSE);
-
-        }
-        for (Servo s : new Servo[]{Angle1,Angle2,FlowerR,FlowerL}){
-
-        }
+        // Same directions/modes as the recorder (shared method)
+        TeleRecord.configureMotors(FLW, BLW, FRW, BRW, LeftShoot, RightShoot, Intake);
 
         boolean loaded = loadRecording();
         telemetry.addData("Status", loaded
@@ -78,15 +67,31 @@ public class Playback extends LinearOpMode {
             double t = timer.seconds();
 
             // Advance to the latest frame whose timestamp has passed
-            while (index + 1 < frames.size() && frames.get(index + 1)[0] <= t) {
+            while (index + 1 < frames.size() && frames.get(index + 1)[T] <= t) {
                 index++;
             }
 
             double[] f = frames.get(index);
-            FLW.setPower(clip(f[1] * scale));
-            BLW.setPower(clip(f[2] * scale));
-            FRW.setPower(clip(f[3] * scale));
-            BRW.setPower(clip(f[4] * scale));
+
+            // Drive
+            FLW.setPower(clip(f[FL] * scale));
+            BLW.setPower(clip(f[BL] * scale));
+            FRW.setPower(clip(f[FR] * scale));
+            BRW.setPower(clip(f[BR] * scale));
+
+            // Shooter (voltage-scaled for consistent shots)
+            LeftShoot.setPower(clip(f[L_SHOOT] * scale));
+            RightShoot.setPower(clip(f[R_SHOOT] * scale));
+
+            // Intake + stopper
+            Intake.setPower(f[INTAKE]);
+            Stopper.setPower(f[STOPPER]);
+
+            // Servos (NaN = never commanded during recording, so leave alone)
+            setServo(Angle1, f[ANGLE1]);
+            setServo(Angle2, f[ANGLE2]);
+            setServo(FlowerR, f[FLOWER_R]);
+            setServo(FlowerL, f[FLOWER_L]);
 
             telemetry.addData("Playback", "%.1f / %.1f s", t, duration);
             telemetry.addData("Frame", index + "/" + frames.size());
@@ -94,14 +99,26 @@ public class Playback extends LinearOpMode {
             telemetry.update();
         }
 
+        stopAll();
+    }
+
+    private void stopAll() {
         FLW.setPower(0);
         BLW.setPower(0);
         FRW.setPower(0);
         BRW.setPower(0);
+        LeftShoot.setPower(0);
+        RightShoot.setPower(0);
+        Intake.setPower(0);
+        Stopper.setPower(0);
+    }
+
+    private static void setServo(Servo s, double pos) {
+        if (!Double.isNaN(pos)) s.setPosition(pos);
     }
 
     private boolean loadRecording() {
-        try (BufferedReader r = new BufferedReader(new FileReader(TeleRecord.FILE_PATH))) {
+        try (BufferedReader r = new BufferedReader(new FileReader(FILE_PATH))) {
             String line;
             while ((line = r.readLine()) != null) {
                 line = line.trim();
@@ -113,10 +130,15 @@ public class Playback extends LinearOpMode {
                     continue;
                 }
                 String[] p = line.split(",");
-                frames.add(new double[]{
-                        Double.parseDouble(p[0]), Double.parseDouble(p[1]),
-                        Double.parseDouble(p[2]), Double.parseDouble(p[3]),
-                        Double.parseDouble(p[4])});
+                if (p.length != COLUMNS) {
+                    throw new IllegalStateException(
+                            "Old/invalid file format (" + p.length + " columns). Re-record.");
+                }
+                double[] f = new double[COLUMNS];
+                for (int i = 0; i < COLUMNS; i++) {
+                    f[i] = Double.parseDouble(p[i]); // parses "NaN" correctly
+                }
+                frames.add(f);
             }
             return !frames.isEmpty();
         } catch (Exception e) {
