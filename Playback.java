@@ -1,162 +1,173 @@
 package org.firstinspires.ftc.teamcode;
 
+import com.pedropathing.api.Paths;
+import com.pedropathing.follower.Follower;
+import com.pedropathing.math.Pose;
+import com.pedropathing.paths.Path;
 import com.qualcomm.robotcore.eventloop.opmode.Autonomous;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
-import com.qualcomm.robotcore.hardware.CRServo;
-import com.qualcomm.robotcore.hardware.DcMotor;
-import com.qualcomm.robotcore.hardware.Servo;
-import com.qualcomm.robotcore.hardware.VoltageSensor;
 import com.qualcomm.robotcore.util.ElapsedTime;
 
-import java.io.BufferedReader;
-import java.io.FileReader;
-import java.util.ArrayList;
+import org.firstinspires.ftc.teamcode.pedro.Constants;
 
-import static org.firstinspires.ftc.teamcode.TeleRecord.*;
+import java.io.IOException;
+import java.util.List;
 
 /**
- * Replays everything recorded by TeleRecord (drive + mechanisms) on the same timeline.
- * Drive and shooter powers are scaled by (recorded battery voltage / current voltage)
- * so a different battery charge doesn't change the result as much.
+ * Replays a route recorded with "Record Route (30s)".
+ *
+ * Instead of repeating stick inputs, the robot drives to the POSITIONS you drove
+ * through (using the Pinpoint + Pedro follower), so it corrects for slip, battery
+ * and bumps. Mechanisms fire when the robot reaches the spot where you used them,
+ * and when you stopped to shoot, it holds that spot and replays your timing.
+ *
+ * Place the robot at the same start pose you used when recording.
  */
-@Autonomous(name = "Playback Recorded Drive", group = "Record")
+@Autonomous(name = "Playback Recorded Route", group = "Record")
 public class Playback extends LinearOpMode {
 
-    private DcMotor FLW, BLW, FRW, BRW, LeftShoot, RightShoot, Intake;
-    private Servo Angle1, Angle2, FlowerR, FlowerL;
-    private CRServo Stopper;
+    /**
+     * On straight-through waypoints, move on to the next line when the robot is
+     * within this many inches (so it doesn't stop at every waypoint).
+     * Set to 0 to make it fully stop and settle at every waypoint.
+     */
+    private static final double ADVANCE_RADIUS_IN = 3.0;
 
-    private final ArrayList<double[]> frames = new ArrayList<>();
-    private double recordedVoltage = 12.0;
-    private double duration = 0;
+    /** The robot counts as "in position" within these tolerances ... */
+    private static final double SETTLE_POS_IN = 1.0;
+    private static final double SETTLE_HEADING_DEG = 3.0;
+    /** ... or after this long, so one stubborn spot can't eat the whole autonomous. */
+    private static final double SETTLE_TIMEOUT_S = 1.5;
+
+    private Follower follower;
+    private Mechanisms mech;
+
+    private final ElapsedTime stepTimer = new ElapsedTime();
+    private int timelineIndex = -1;
+    /** For timed holds: stepTimer reading when the robot settled (-1 = not yet). */
+    private double settledAt = -1;
 
     @Override
     public void runOpMode() {
-        FLW = hardwareMap.dcMotor.get("FLW");
-        BLW = hardwareMap.dcMotor.get("BLW");
-        FRW = hardwareMap.dcMotor.get("FRW");
-        BRW = hardwareMap.dcMotor.get("BRW");
-        LeftShoot = hardwareMap.dcMotor.get("LeftShoot");
-        RightShoot = hardwareMap.dcMotor.get("RightShoot");
-        Intake = hardwareMap.dcMotor.get("Intake");
-        Angle1 = hardwareMap.servo.get("Angle1");
-        Angle2 = hardwareMap.servo.get("Angle2");
-        FlowerR = hardwareMap.servo.get("FlowerR");
-        FlowerL = hardwareMap.servo.get("FlowerL");
-        Stopper = hardwareMap.crservo.get("Stopper");
+        follower = Constants.create(hardwareMap);
+        mech = new Mechanisms(hardwareMap);
 
-        // Same directions/modes as the recorder (shared method)
-        TeleRecord.configureMotors(FLW, BLW, FRW, BRW, LeftShoot, RightShoot, Intake);
+        RouteData.Recording rec;
+        List<RouteData.Step> steps;
+        try {
+            rec = RouteData.load();
+            steps = RouteData.plan(rec.frames);
+        } catch (IOException e) {
+            telemetry.addData("ERROR", "Could not load route: " + e.getMessage());
+            telemetry.addData("Fix", "Run \"Record Route (30s)\" first");
+            telemetry.update();
+            waitForStart();
+            return;
+        }
 
-        boolean loaded = loadRecording();
-        telemetry.addData("Status", loaded
-                ? "Loaded " + frames.size() + " frames (" + String.format("%.1f", duration) + " s)"
-                : "NO RECORDING LOADED - run Record Drive first");
+        Pose startPose = new Pose(rec.startX, rec.startY, rec.startH);
+        follower.setPose(startPose);
+        follower.update();
+
+        telemetry.addData("Status", "Loaded %d frames -> %d steps", rec.frames.size(), steps.size());
+        telemetry.addData("Place robot at", "x=%.1f y=%.1f heading=%.0f deg",
+                rec.startX, rec.startY, Math.toDegrees(rec.startH));
+        for (int i = 0; i < Math.min(steps.size(), 8); i++) {
+            telemetry.addData("Step " + (i + 1), steps.get(i).toString());
+        }
         telemetry.update();
 
         waitForStart();
-        if (!loaded || frames.isEmpty()) return;
+        if (steps.isEmpty()) return;
 
-        double scale = recordedVoltage / getBatteryVoltage();
-        scale = Math.max(0.8, Math.min(scale, 1.25)); // keep the correction sane
+        follower.setPose(startPose);
+        follower.update();
 
-        ElapsedTime timer = new ElapsedTime();
-        int index = 0;
+        // Shooter power compensates for a different battery than when you recorded
+        double scale = rec.voltage / Mechanisms.batteryVoltage(hardwareMap);
+        mech.setShooterScale(Math.max(0.8, Math.min(scale, 1.25)));
 
-        while (opModeIsActive() && timer.seconds() <= duration) {
-            double t = timer.seconds();
+        int i = 0;
+        beginStep(steps.get(i));
+        ElapsedTime uiTimer = new ElapsedTime();
 
-            // Advance to the latest frame whose timestamp has passed
-            while (index + 1 < frames.size() && frames.get(index + 1)[T] <= t) {
-                index++;
+        while (opModeIsActive() && i < steps.size()) {
+            follower.update(); // as often as possible, no sleep
+
+            RouteData.Step current = steps.get(i);
+            RouteData.Step next = i + 1 < steps.size() ? steps.get(i + 1) : null;
+
+            if (isDone(current, next)) {
+                i++;
+                if (i < steps.size()) beginStep(steps.get(i));
             }
 
-            double[] f = frames.get(index);
-
-            // Drive
-            FLW.setPower(clip(f[FL] * scale));
-            BLW.setPower(clip(f[BL] * scale));
-            FRW.setPower(clip(f[FR] * scale));
-            BRW.setPower(clip(f[BR] * scale));
-
-            // Shooter (voltage-scaled for consistent shots)
-            LeftShoot.setPower(clip(f[L_SHOOT] * scale));
-            RightShoot.setPower(clip(f[R_SHOOT] * scale));
-
-            // Intake + stopper
-            Intake.setPower(f[INTAKE]);
-            Stopper.setPower(f[STOPPER]);
-
-            // Servos (NaN = never commanded during recording, so leave alone)
-            setServo(Angle1, f[ANGLE1]);
-            setServo(Angle2, f[ANGLE2]);
-            setServo(FlowerR, f[FLOWER_R]);
-            setServo(FlowerL, f[FLOWER_L]);
-
-            telemetry.addData("Playback", "%.1f / %.1f s", t, duration);
-            telemetry.addData("Frame", index + "/" + frames.size());
-            telemetry.addData("Voltage scale", "%.2f", scale);
-            telemetry.update();
-        }
-
-        stopAll();
-    }
-
-    private void stopAll() {
-        FLW.setPower(0);
-        BLW.setPower(0);
-        FRW.setPower(0);
-        BRW.setPower(0);
-        LeftShoot.setPower(0);
-        RightShoot.setPower(0);
-        Intake.setPower(0);
-        Stopper.setPower(0);
-    }
-
-    private static void setServo(Servo s, double pos) {
-        if (!Double.isNaN(pos)) s.setPosition(pos);
-    }
-
-    private boolean loadRecording() {
-        try (BufferedReader r = new BufferedReader(new FileReader(FILE_PATH))) {
-            String line;
-            while ((line = r.readLine()) != null) {
-                line = line.trim();
-                if (line.isEmpty()) continue;
-                if (line.startsWith("#")) {
-                    String[] h = line.substring(1).split(",");
-                    recordedVoltage = Double.parseDouble(h[0]);
-                    duration = Double.parseDouble(h[1]);
-                    continue;
-                }
-                String[] p = line.split(",");
-                if (p.length != COLUMNS) {
-                    throw new IllegalStateException(
-                            "Old/invalid file format (" + p.length + " columns). Re-record.");
-                }
-                double[] f = new double[COLUMNS];
-                for (int i = 0; i < COLUMNS; i++) {
-                    f[i] = Double.parseDouble(p[i]); // parses "NaN" correctly
-                }
-                frames.add(f);
+            if (uiTimer.milliseconds() > 100) {
+                Pose p = follower.pose();
+                telemetry.addData("Step", "%d / %d", Math.min(i + 1, steps.size()), steps.size());
+                telemetry.addData("Pose", "x=%.1f y=%.1f h=%.0f deg", p.x(), p.y(), Math.toDegrees(p.heading()));
+                if (i < steps.size()) telemetry.addData("Doing", steps.get(i).toString());
+                telemetry.update();
+                uiTimer.reset();
             }
-            return !frames.isEmpty();
-        } catch (Exception e) {
-            telemetry.addData("Error", "Could not load file: " + e.getMessage());
-            return false;
+        }
+
+        mech.stop();
+    }
+
+    /** Start a step: apply its mechanism state, then send the follower where it needs to go. */
+    private void beginStep(RouteData.Step s) {
+        stepTimer.reset();
+        timelineIndex = -1;
+        settledAt = -1;
+        // A timed hold starts its mechanisms only once the robot is in position
+        if (!(s.hold && s.holdSeconds > 0)) mech.apply(s.mech);
+
+        if (s.hold) {
+            follower.hold(new Pose(s.x, s.y, s.h));
+        } else {
+            Pose from = new Pose(s.fx, s.fy, s.fh);
+            Pose to = new Pose(s.x, s.y, s.h);
+            Path path = Paths.line(from, to).linear(from, to);
+            follower.follow(path);
         }
     }
 
-    private double getBatteryVoltage() {
-        double result = Double.POSITIVE_INFINITY;
-        for (VoltageSensor sensor : hardwareMap.voltageSensor) {
-            double v = sensor.getVoltage();
-            if (v > 0) result = Math.min(result, v);
+    private boolean isDone(RouteData.Step s, RouteData.Step next) {
+        double elapsed = stepTimer.seconds();
+        Pose p = follower.pose();
+
+        if (s.hold) {
+            boolean inPosition = Math.hypot(p.x() - s.x, p.y() - s.y) <= SETTLE_POS_IN
+                    && Math.abs(RouteData.normalize(p.heading() - s.h)) <= Math.toRadians(SETTLE_HEADING_DEG);
+            boolean gaveUp = elapsed >= SETTLE_TIMEOUT_S;
+
+            if (s.holdSeconds <= 0) {
+                return inPosition || gaveUp; // turn in place: done once settled
+            }
+
+            // Timed hold (e.g. shooting): wait until in position, THEN replay your timing
+            if (settledAt < 0) {
+                if (!(inPosition || gaveUp)) return false;
+                settledAt = elapsed;
+            }
+            double sinceSettled = elapsed - settledAt;
+            applyTimeline(s, sinceSettled);
+            return sinceSettled >= s.holdSeconds;
         }
-        return result == Double.POSITIVE_INFINITY ? 12.0 : result;
+
+        // MOVE
+        boolean keepRolling = next != null && !next.hold;
+        double dist = Math.hypot(p.x() - s.x, p.y() - s.y);
+        if (keepRolling && ADVANCE_RADIUS_IN > 0 && dist <= ADVANCE_RADIUS_IN) return true;
+        return follower.atParametricEnd() || elapsed >= s.timeoutSeconds();
     }
 
-    private static double clip(double p) {
-        return Math.max(-1.0, Math.min(1.0, p));
+    /** During a hold, replay mechanism changes at the same offsets they happened in the recording. */
+    private void applyTimeline(RouteData.Step s, double elapsed) {
+        int idx = timelineIndex;
+        while (idx + 1 < s.timeline.size() && s.timeline.get(idx + 1).offset <= elapsed) idx++;
+        if (idx >= 0 && idx != timelineIndex) mech.apply(s.timeline.get(idx).mech);
+        timelineIndex = idx;
     }
 }
