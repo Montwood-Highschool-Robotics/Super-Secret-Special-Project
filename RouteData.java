@@ -16,15 +16,15 @@ import java.util.Locale;
 /**
  * Everything about a recorded route that does NOT touch robot hardware:
  *  - the file format (one row per loop: time, x, y, heading, mechanism outputs)
- *  - the planner that turns the raw log into a short list of Steps
+ *  - the planner that turns the raw recording into a short list of RouteSteps
  *
- * A Step is either
- *   MOVE: drive a straight line from one recorded pose to the next, or
- *   HOLD: stay at a pose (turning in place, or waiting while mechanisms run
- *         on the same timing you used when you drove it).
+ * A RouteStep is either
+ *   DRIVE A LINE: go in a straight line from one recorded position to the next, or
+ *   HOLD:         stay at a position (turning in place, or waiting while the
+ *                 mechanisms run with the same timing you used when you drove it).
  *
- * Poses are in inches / radians in the Pedro field frame, exactly as reported
- * by the Pinpoint localizer.
+ * All positions are in inches and all angles in radians, in the Pedro field frame,
+ * exactly as reported by the Pinpoint localizer.
  */
 public final class RouteData {
     private RouteData() {}
@@ -36,173 +36,209 @@ public final class RouteData {
     public static final double RECORD_SECONDS = 30.0;
 
     /** Where the robot must be placed for BOTH recording and playback. */
-    public static final double START_X = 0.0;
-    public static final double START_Y = 0.0;
-    public static final double START_HEADING_DEG = 0.0;
+    public static final double START_X_INCHES = 0.0;
+    public static final double START_Y_INCHES = 0.0;
+    public static final double START_HEADING_DEGREES = 0.0;
 
     // ------------------------------------------------------------------
-    // Mechanism state layout (one double per output)
-    // 0-4 are motor / continuous-servo powers, 5-8 are servo positions.
+    // Mechanism state layout: one number per output, stored in an array.
+    // Entries 0-4 are motor / continuous-servo powers, entries 5-8 are servo positions.
     // A servo position of NaN means "never commanded" and is left alone.
     // ------------------------------------------------------------------
-    public static final int L_SHOOT = 0, R_SHOOT = 1, INTAKE = 2, STOPPER = 3, THIS_ONE_2 = 4;
-    public static final int ANGLE1 = 5, ANGLE2 = 6, FLOWER_R = 7, FLOWER_L = 8;
-    public static final int MECH_COUNT = 9;
-    private static final int LAST_POWER_INDEX = THIS_ONE_2;
-    private static final int COLUMNS = 4 + MECH_COUNT;
-    private static final String MAGIC = "ODO1";
+    public static final int LEFT_SHOOTER = 0;
+    public static final int RIGHT_SHOOTER = 1;
+    public static final int INTAKE = 2;
+    public static final int STOPPER = 3;
+    public static final int STOPPER_PARTNER = 4; // the "ThisOne2" continuous servo
+    public static final int ANGLE_SERVO_1 = 5;
+    public static final int ANGLE_SERVO_2 = 6;
+    public static final int FLOWER_RIGHT = 7;
+    public static final int FLOWER_LEFT = 8;
+    public static final int MECHANISM_COUNT = 9;
+
+    private static final int LAST_POWER_OUTPUT = STOPPER_PARTNER;
+    private static final int FILE_COLUMNS = 4 + MECHANISM_COUNT; // time, x, y, heading + mechanisms
+    private static final String FILE_TAG = "ODO1";
 
     // ------------------------------------------------------------------
     // Planner tuning
     // ------------------------------------------------------------------
-    /** How closely the replayed path must follow the path you drove (inches). */
-    public static final double PATH_TOLERANCE_IN = 1.5;
-    /** Heading error that counts as much as PATH_TOLERANCE_IN of position error. */
-    public static final double HEADING_TOLERANCE_DEG = 8.0;
-    /** A single straight segment never changes heading by more than this. */
-    public static final double MAX_STEP_HEADING_DEG = 70.0;
-    /** Moves shorter than this are not worth a path. */
-    public static final double MIN_MOVE_IN = 1.0;
+    /** How closely the replayed path must follow the path you drove. */
+    public static final double PATH_TOLERANCE_INCHES = 1.5;
+    /** A heading error this big counts as much as PATH_TOLERANCE_INCHES of position error. */
+    public static final double HEADING_TOLERANCE_DEGREES = 8.0;
+    /** One straight line never changes the robot's heading by more than this. */
+    public static final double MAX_HEADING_CHANGE_PER_LINE_DEGREES = 70.0;
+    /** Moves shorter than this are not worth driving. */
+    public static final double MIN_LINE_LENGTH_INCHES = 1.0;
     /** Heading changes smaller than this (with no movement) are ignored. */
-    public static final double MIN_TURN_DEG = 4.0;
+    public static final double MIN_TURN_DEGREES = 4.0;
     /** The robot counts as "stopped" if it moves less than this ... */
-    public static final double STILL_DIST_IN = 0.75;
-    public static final double STILL_ANGLE_DEG = 3.0;
+    public static final double STILL_DISTANCE_INCHES = 0.75;
+    public static final double STILL_ANGLE_DEGREES = 3.0;
     /** ... for this long. */
-    public static final double STILL_WINDOW_S = 0.30;
-    /** A stop only becomes a timed HOLD if it lasts this long and something was running. */
-    public static final double MIN_DWELL_S = 0.40;
+    public static final double STILL_WINDOW_SECONDS = 0.30;
+    /** A stop only becomes a timed hold if it lasts this long AND a mechanism was active. */
+    public static final double MIN_STOP_SECONDS = 0.40;
 
-    private static final double HEADING_TOL_RAD = Math.toRadians(HEADING_TOLERANCE_DEG);
-    private static final double MAX_STEP_HEADING_RAD = Math.toRadians(MAX_STEP_HEADING_DEG);
-    private static final double MIN_TURN_RAD = Math.toRadians(MIN_TURN_DEG);
-    private static final double STILL_ANGLE_RAD = Math.toRadians(STILL_ANGLE_DEG);
+    private static final double HEADING_TOLERANCE_RADIANS = Math.toRadians(HEADING_TOLERANCE_DEGREES);
+    private static final double MAX_HEADING_CHANGE_PER_LINE_RADIANS =
+            Math.toRadians(MAX_HEADING_CHANGE_PER_LINE_DEGREES);
+    private static final double MIN_TURN_RADIANS = Math.toRadians(MIN_TURN_DEGREES);
+    private static final double STILL_ANGLE_RADIANS = Math.toRadians(STILL_ANGLE_DEGREES);
 
     // ------------------------------------------------------------------
     // Data classes
     // ------------------------------------------------------------------
-    public static final class Frame {
-        public final double t, x, y, h;
-        public final double[] mech;
 
-        public Frame(double t, double x, double y, double h, double[] mech) {
-            this.t = t;
-            this.x = x;
-            this.y = y;
-            this.h = h;
-            this.mech = mech.clone();
+    /** One snapshot taken during recording: where the robot was and what the mechanisms did. */
+    public static final class RecordedFrame {
+        public final double timeSeconds;
+        public final double xInches, yInches, headingRadians;
+        public final double[] mechanismState;
+
+        public RecordedFrame(double timeSeconds, double xInches, double yInches,
+                             double headingRadians, double[] mechanismState) {
+            this.timeSeconds = timeSeconds;
+            this.xInches = xInches;
+            this.yInches = yInches;
+            this.headingRadians = headingRadians;
+            this.mechanismState = mechanismState.clone();
         }
     }
 
+    /** A whole recording: header information plus every frame. */
     public static final class Recording {
-        public double voltage = 12.0;
-        public double duration = 0;
-        public double startX, startY, startH;
-        public final List<Frame> frames = new ArrayList<>();
+        public double batteryVoltage = 12.0;
+        public double durationSeconds = 0;
+        public double startXInches, startYInches, startHeadingRadians;
+        public final List<RecordedFrame> frames = new ArrayList<>();
     }
 
-    public static final class TimedMech {
-        public final double offset;
-        public final double[] mech;
+    /** A mechanism state that should be applied some time after a hold begins. */
+    public static final class TimedMechanismState {
+        public final double secondsIntoHold;
+        public final double[] mechanismState;
 
-        TimedMech(double offset, double[] mech) {
-            this.offset = offset;
-            this.mech = mech.clone();
+        TimedMechanismState(double secondsIntoHold, double[] mechanismState) {
+            this.secondsIntoHold = secondsIntoHold;
+            this.mechanismState = mechanismState.clone();
         }
     }
 
-    public static final class Step {
-        /** false = MOVE along a line, true = HOLD a pose. */
-        public final boolean hold;
-        /** MOVE only: where the line starts. */
-        public final double fx, fy, fh;
-        /** Target pose (end of the line, or the pose to hold). */
-        public final double x, y, h;
-        /** Mechanism state applied when the step starts. */
-        public final double[] mech;
-        /** HOLD only: how long to stay (0 = turn in place, wait until settled). */
+    /** One instruction for Playback: drive a line, or hold a position. */
+    public static final class RouteStep {
+        /** false = drive a straight line, true = hold a position. */
+        public final boolean isHold;
+
+        /** Drive-a-line steps only: where the line starts. */
+        public final double startX, startY, startHeading;
+
+        /** Where the robot should end up (end of the line, or the position to hold). */
+        public final double targetX, targetY, targetHeading;
+
+        /** Mechanism state applied when this step begins. */
+        public final double[] mechanismStateAtStart;
+
+        /** Hold steps only: how long to stay (0 means "turn in place until settled"). */
         public final double holdSeconds;
-        /** HOLD only: mechanism changes by time since the hold began. */
-        public final List<TimedMech> timeline;
 
-        private Step(boolean hold, double fx, double fy, double fh, double x, double y, double h,
-                     double[] mech, double holdSeconds, List<TimedMech> timeline) {
-            this.hold = hold;
-            this.fx = fx;
-            this.fy = fy;
-            this.fh = fh;
-            this.x = x;
-            this.y = y;
-            this.h = normalize(h);
-            this.mech = mech.clone();
+        /** Hold steps only: mechanism changes, by time since the hold began. */
+        public final List<TimedMechanismState> mechanismTimeline;
+
+        private RouteStep(boolean isHold,
+                          double startX, double startY, double startHeading,
+                          double targetX, double targetY, double targetHeading,
+                          double[] mechanismStateAtStart, double holdSeconds,
+                          List<TimedMechanismState> mechanismTimeline) {
+            this.isHold = isHold;
+            this.startX = startX;
+            this.startY = startY;
+            this.startHeading = startHeading;
+            this.targetX = targetX;
+            this.targetY = targetY;
+            this.targetHeading = normalizeAngle(targetHeading);
+            this.mechanismStateAtStart = mechanismStateAtStart.clone();
             this.holdSeconds = holdSeconds;
-            this.timeline = timeline;
+            this.mechanismTimeline = mechanismTimeline;
         }
 
-        static Step move(double fx, double fy, double fh, double x, double y, double h, double[] mech) {
-            return new Step(false, fx, fy, normalize(fh), x, y, h, mech, 0, new ArrayList<TimedMech>());
+        static RouteStep driveLine(double startX, double startY, double startHeading,
+                                   double targetX, double targetY, double targetHeading,
+                                   double[] mechanismState) {
+            return new RouteStep(false, startX, startY, normalizeAngle(startHeading),
+                    targetX, targetY, targetHeading,
+                    mechanismState, 0, new ArrayList<TimedMechanismState>());
         }
 
-        static Step hold(double x, double y, double h, double[] mech, double seconds,
-                         List<TimedMech> timeline) {
-            return new Step(true, x, y, h, x, y, h, mech, seconds, timeline);
+        static RouteStep holdPosition(double x, double y, double heading,
+                                      double[] mechanismState, double seconds,
+                                      List<TimedMechanismState> mechanismTimeline) {
+            return new RouteStep(true, x, y, heading, x, y, heading,
+                    mechanismState, seconds, mechanismTimeline);
         }
 
-        /** MOVE: straight-line length in inches. */
-        public double length() {
-            return Math.hypot(x - fx, y - fy);
+        /** Drive-a-line steps: straight-line length in inches. */
+        public double lengthInches() {
+            return Math.hypot(targetX - startX, targetY - startY);
         }
 
         /** Give up on a step that takes far longer than a normal drive would. */
         public double timeoutSeconds() {
-            return hold ? holdSeconds + 2.0 : 1.5 + length() / 12.0;
+            return isHold ? holdSeconds + 2.0 : 1.5 + lengthInches() / 12.0;
         }
 
         @Override
         public String toString() {
-            if (hold) {
-                return String.format(Locale.US, "HOLD (%.1f, %.1f, %.0f deg) for %.2f s, %d mech change(s)",
-                        x, y, Math.toDegrees(h), holdSeconds, timeline.size());
+            if (isHold) {
+                return String.format(Locale.US, "HOLD (%.1f, %.1f, %.0f deg) for %.2f s, %d mechanism change(s)",
+                        targetX, targetY, Math.toDegrees(targetHeading),
+                        holdSeconds, mechanismTimeline.size());
             }
-            return String.format(Locale.US, "MOVE (%.1f, %.1f, %.0f deg) -> (%.1f, %.1f, %.0f deg)",
-                    fx, fy, Math.toDegrees(fh), x, y, Math.toDegrees(h));
+            return String.format(Locale.US, "DRIVE (%.1f, %.1f, %.0f deg) -> (%.1f, %.1f, %.0f deg)",
+                    startX, startY, Math.toDegrees(startHeading),
+                    targetX, targetY, Math.toDegrees(targetHeading));
         }
     }
 
     // ------------------------------------------------------------------
-    // Angle helpers
+    // Angle helper
     // ------------------------------------------------------------------
-    /** Wrap an angle into (-pi, pi]. */
-    public static double normalize(double a) {
-        while (a > Math.PI) a -= 2 * Math.PI;
-        while (a <= -Math.PI) a += 2 * Math.PI;
-        return a;
+
+    /** Wrap an angle into the range (-pi, pi]. */
+    public static double normalizeAngle(double angle) {
+        while (angle > Math.PI) angle -= 2 * Math.PI;
+        while (angle <= -Math.PI) angle += 2 * Math.PI;
+        return angle;
     }
 
     // ------------------------------------------------------------------
-    // File I/O
+    // File reading and writing
     // ------------------------------------------------------------------
-    public static void save(Recording r) throws IOException {
-        save(r, FILE_PATH);
+    public static void save(Recording recording) throws IOException {
+        save(recording, FILE_PATH);
     }
 
-    public static void save(Recording r, String path) throws IOException {
+    public static void save(Recording recording, String path) throws IOException {
         File file = new File(path);
-        File dir = file.getParentFile();
-        if (dir != null && !dir.exists()) dir.mkdirs();
+        File folder = file.getParentFile();
+        if (folder != null && !folder.exists()) folder.mkdirs();
 
-        try (BufferedWriter w = new BufferedWriter(new FileWriter(file))) {
-            w.write(String.format(Locale.US, "#%s,%.3f,%.3f,%.5f,%.5f,%.6f",
-                    MAGIC, r.voltage, r.duration, r.startX, r.startY, r.startH));
-            w.newLine();
-            for (Frame f : r.frames) {
-                StringBuilder sb = new StringBuilder();
-                sb.append(String.format(Locale.US, "%.4f,%.4f,%.4f,%.5f", f.t, f.x, f.y, f.h));
-                for (double v : f.mech) {
-                    sb.append(',').append(String.format(Locale.US, "%.4f", v)); // NaN -> "NaN"
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter(file))) {
+            writer.write(String.format(Locale.US, "#%s,%.3f,%.3f,%.5f,%.5f,%.6f",
+                    FILE_TAG, recording.batteryVoltage, recording.durationSeconds,
+                    recording.startXInches, recording.startYInches, recording.startHeadingRadians));
+            writer.newLine();
+
+            for (RecordedFrame frame : recording.frames) {
+                StringBuilder row = new StringBuilder();
+                row.append(String.format(Locale.US, "%.4f,%.4f,%.4f,%.5f",
+                        frame.timeSeconds, frame.xInches, frame.yInches, frame.headingRadians));
+                for (double value : frame.mechanismState) {
+                    row.append(',').append(String.format(Locale.US, "%.4f", value)); // NaN is written as "NaN"
                 }
-                w.write(sb.toString());
-                w.newLine();
+                writer.write(row.toString());
+                writer.newLine();
             }
         }
     }
@@ -212,286 +248,378 @@ public final class RouteData {
     }
 
     public static Recording load(String path) throws IOException {
-        Recording r = new Recording();
-        boolean sawHeader = false;
-        try (BufferedReader br = new BufferedReader(new FileReader(path))) {
+        Recording recording = new Recording();
+        boolean foundHeader = false;
+
+        try (BufferedReader reader = new BufferedReader(new FileReader(path))) {
             String line;
-            int lineNo = 0;
-            while ((line = br.readLine()) != null) {
-                lineNo++;
+            int lineNumber = 0;
+            while ((line = reader.readLine()) != null) {
+                lineNumber++;
                 line = line.trim();
                 if (line.isEmpty()) continue;
+
                 try {
                     if (line.startsWith("#")) {
-                        String[] h = line.substring(1).split(",");
-                        if (h.length < 6 || !MAGIC.equals(h[0])) {
+                        String[] header = line.substring(1).split(",");
+                        if (header.length < 6 || !FILE_TAG.equals(header[0])) {
                             throw new IOException("Not a route recording (old format?). Record again.");
                         }
-                        r.voltage = Double.parseDouble(h[1]);
-                        r.duration = Double.parseDouble(h[2]);
-                        r.startX = Double.parseDouble(h[3]);
-                        r.startY = Double.parseDouble(h[4]);
-                        r.startH = Double.parseDouble(h[5]);
-                        sawHeader = true;
+                        recording.batteryVoltage = Double.parseDouble(header[1]);
+                        recording.durationSeconds = Double.parseDouble(header[2]);
+                        recording.startXInches = Double.parseDouble(header[3]);
+                        recording.startYInches = Double.parseDouble(header[4]);
+                        recording.startHeadingRadians = Double.parseDouble(header[5]);
+                        foundHeader = true;
                         continue;
                     }
-                    if (!sawHeader) {
+
+                    if (!foundHeader) {
                         throw new IOException("Missing header (old format?). Record again.");
                     }
-                    String[] p = line.split(",");
-                    if (p.length != COLUMNS) {
-                        throw new IOException("Line " + lineNo + ": expected " + COLUMNS + " columns");
+
+                    String[] parts = line.split(",");
+                    if (parts.length != FILE_COLUMNS) {
+                        throw new IOException("Line " + lineNumber + ": expected " + FILE_COLUMNS + " columns");
                     }
-                    double[] v = new double[COLUMNS];
-                    for (int i = 0; i < COLUMNS; i++) v[i] = Double.parseDouble(p[i]); // parses "NaN"
-                    r.frames.add(new Frame(v[0], v[1], v[2], v[3], Arrays.copyOfRange(v, 4, COLUMNS)));
+                    double[] numbers = new double[FILE_COLUMNS];
+                    for (int column = 0; column < FILE_COLUMNS; column++) {
+                        numbers[column] = Double.parseDouble(parts[column]); // understands "NaN"
+                    }
+                    recording.frames.add(new RecordedFrame(
+                            numbers[0], numbers[1], numbers[2], numbers[3],
+                            Arrays.copyOfRange(numbers, 4, FILE_COLUMNS)));
                 } catch (NumberFormatException e) {
-                    throw new IOException("Line " + lineNo + ": bad number");
+                    throw new IOException("Line " + lineNumber + ": bad number");
                 }
             }
         }
-        if (r.frames.size() < 2) throw new IOException("Recording has too few frames");
-        return r;
+
+        if (recording.frames.size() < 2) throw new IOException("Recording has too few frames");
+        return recording;
     }
 
     // ------------------------------------------------------------------
-    // Planner
+    // Planner: raw recording -> short list of steps
     // ------------------------------------------------------------------
-    public static List<Step> plan(List<Frame> frames) {
-        return new Planner(frames).run();
+    public static List<RouteStep> planRoute(List<RecordedFrame> frames) {
+        return new Planner(frames).buildSteps();
     }
 
-    static boolean same(double a, double b) {
+    private static boolean sameValue(double a, double b) {
         if (Double.isNaN(a) || Double.isNaN(b)) return Double.isNaN(a) && Double.isNaN(b);
         return Math.abs(a - b) < 1e-9;
     }
 
-    static boolean sameMech(double[] a, double[] b) {
-        for (int i = 0; i < MECH_COUNT; i++) if (!same(a[i], b[i])) return false;
+    private static boolean sameMechanismState(double[] a, double[] b) {
+        for (int i = 0; i < MECHANISM_COUNT; i++) {
+            if (!sameValue(a[i], b[i])) return false;
+        }
         return true;
     }
 
-    private static final class Planner {
-        final int n;
-        final double[] t, x, y, h; // h is unwrapped so it never jumps by 2*pi
-        final double[][] m;
-        final List<Step> steps = new ArrayList<>();
+    /** A time the robot sat still while a mechanism was doing something. */
+    private static final class Stop {
+        final int firstFrame, lastFrame;              // the whole time the robot was still
+        final int firstActiveFrame, lastActiveFrame;  // the part where a mechanism was active
 
-        Planner(List<Frame> frames) {
-            n = frames.size();
-            t = new double[n];
-            x = new double[n];
-            y = new double[n];
-            h = new double[n];
-            m = new double[n][];
-            for (int i = 0; i < n; i++) {
-                Frame f = frames.get(i);
-                t[i] = f.t;
-                x[i] = f.x;
-                y[i] = f.y;
-                h[i] = i == 0 ? f.h : h[i - 1] + normalize(f.h - h[i - 1]);
-                m[i] = f.mech;
+        Stop(int firstFrame, int lastFrame, int firstActiveFrame, int lastActiveFrame) {
+            this.firstFrame = firstFrame;
+            this.lastFrame = lastFrame;
+            this.firstActiveFrame = firstActiveFrame;
+            this.lastActiveFrame = lastActiveFrame;
+        }
+    }
+
+    private static final class Planner {
+        final int frameCount;
+        final double[] timeSeconds, xInches, yInches;
+        final double[] headingRadians; // "unwrapped" so it never jumps by a full turn
+        final double[][] mechanismStates;
+        final List<RouteStep> steps = new ArrayList<>();
+
+        Planner(List<RecordedFrame> frames) {
+            frameCount = frames.size();
+            timeSeconds = new double[frameCount];
+            xInches = new double[frameCount];
+            yInches = new double[frameCount];
+            headingRadians = new double[frameCount];
+            mechanismStates = new double[frameCount][];
+            for (int i = 0; i < frameCount; i++) {
+                RecordedFrame frame = frames.get(i);
+                timeSeconds[i] = frame.timeSeconds;
+                xInches[i] = frame.xInches;
+                yInches[i] = frame.yInches;
+                headingRadians[i] = (i == 0)
+                        ? frame.headingRadians
+                        : headingRadians[i - 1] + normalizeAngle(frame.headingRadians - headingRadians[i - 1]);
+                mechanismStates[i] = frame.mechanismState;
             }
         }
 
-        List<Step> run() {
-            if (n < 2) return steps;
+        List<RouteStep> buildSteps() {
+            if (frameCount < 2) return steps;
 
-            List<int[]> dwells = findDwells(computeStill());
-            int cursor = 0;
-            for (int[] d : dwells) {
-                planStretch(cursor, d[0]);
-                dropTrailingTurn(); // the hold itself turns to its pose and waits for it to settle
-                steps.add(makeDwell(d[0], d[1], d[2], d[3]));
-                cursor = d[1];
+            List<Stop> stops = findStops(findStillFrames());
+            int sectionStartFrame = 0;
+            for (Stop stop : stops) {
+                planDrivingSection(sectionStartFrame, stop.firstFrame);
+                removeTurnBeforeHold(); // the hold itself turns to its position and waits to settle
+                steps.add(makeTimedHold(stop));
+                sectionStartFrame = stop.lastFrame;
             }
-            planStretch(cursor, n - 1);
+            planDrivingSection(sectionStartFrame, frameCount - 1);
             return steps;
         }
 
-        // ---- finding the moments the robot was stopped ----
-        boolean[] computeStill() {
-            boolean[] still = new boolean[n];
-            for (int i = 0; i < n; i++) still[i] = windowStill(i, +1) || windowStill(i, -1);
-            return still;
+        // ---- finding the times the robot was stopped ----
+
+        boolean[] findStillFrames() {
+            boolean[] isStill = new boolean[frameCount];
+            for (int frame = 0; frame < frameCount; frame++) {
+                isStill[frame] = isStillOverWindow(frame, +1) || isStillOverWindow(frame, -1);
+            }
+            return isStill;
         }
 
-        /** True if, over a full STILL_WINDOW_S in one direction, the robot hardly moved. */
-        boolean windowStill(int i, int dir) {
-            int j = i;
-            while (j + dir >= 0 && j + dir < n && Math.abs(t[j] - t[i]) < STILL_WINDOW_S) j += dir;
-            if (Math.abs(t[j] - t[i]) < STILL_WINDOW_S) return false; // not enough data this side
-            for (int k = Math.min(i, j); k <= Math.max(i, j); k++) {
-                if (Math.hypot(x[k] - x[i], y[k] - y[i]) > STILL_DIST_IN
-                        || Math.abs(h[k] - h[i]) > STILL_ANGLE_RAD) {
+        /**
+         * True if, over a full STILL_WINDOW_SECONDS looking forward (direction +1) or
+         * backward (direction -1) from this frame, the robot hardly moved.
+         */
+        boolean isStillOverWindow(int frame, int direction) {
+            int windowEnd = frame;
+            while (windowEnd + direction >= 0 && windowEnd + direction < frameCount
+                    && Math.abs(timeSeconds[windowEnd] - timeSeconds[frame]) < STILL_WINDOW_SECONDS) {
+                windowEnd += direction;
+            }
+            if (Math.abs(timeSeconds[windowEnd] - timeSeconds[frame]) < STILL_WINDOW_SECONDS) {
+                return false; // not enough recording on this side to judge
+            }
+            for (int other = Math.min(frame, windowEnd); other <= Math.max(frame, windowEnd); other++) {
+                double distanceMoved = Math.hypot(xInches[other] - xInches[frame],
+                        yInches[other] - yInches[frame]);
+                double angleTurned = Math.abs(headingRadians[other] - headingRadians[frame]);
+                if (distanceMoved > STILL_DISTANCE_INCHES || angleTurned > STILL_ANGLE_RADIANS) {
                     return false;
                 }
             }
             return true;
         }
 
-        /** Stops that lasted long enough AND had something running: {start, end, firstActive, lastActive}. */
-        List<int[]> findDwells(boolean[] still) {
-            List<int[]> out = new ArrayList<>();
-            int i = 0;
-            while (i < n) {
-                if (!still[i]) {
-                    i++;
+        /** Stops that lasted long enough AND had a mechanism doing something. */
+        List<Stop> findStops(boolean[] isStill) {
+            List<Stop> stops = new ArrayList<>();
+            int frame = 0;
+            while (frame < frameCount) {
+                if (!isStill[frame]) {
+                    frame++;
                     continue;
                 }
-                int a = i;
-                while (i + 1 < n && still[i + 1]) i++;
-                int b = i;
-                i++;
-                if (t[b] - t[a] < MIN_DWELL_S) continue;
-                int[] span = activeSpan(a, b);
-                if (span != null) out.add(new int[]{a, b, span[0], span[1]});
+                int firstFrame = frame;
+                while (frame + 1 < frameCount && isStill[frame + 1]) frame++;
+                int lastFrame = frame;
+                frame++;
+
+                if (timeSeconds[lastFrame] - timeSeconds[firstFrame] < MIN_STOP_SECONDS) continue;
+                int[] activeFrames = findActiveFrames(firstFrame, lastFrame);
+                if (activeFrames != null) {
+                    stops.add(new Stop(firstFrame, lastFrame, activeFrames[0], activeFrames[1]));
+                }
             }
-            return out;
+            return stops;
         }
 
         /**
-         * First and last frame in [a, b] where a mechanism was running or changed, or null
-         * if nothing happened. Idle time before and after is not worth waiting for.
+         * First and last frame between firstFrame and lastFrame where a mechanism was running
+         * or changed, or null if nothing happened. Idle time before and after is not worth
+         * waiting for.
          */
-        int[] activeSpan(int a, int b) {
-            int first = -1, last = -1;
-            for (int i = a; i <= b; i++) {
-                boolean active = false;
-                for (int k = 0; k <= LAST_POWER_INDEX; k++) {
-                    if (Math.abs(m[i][k]) > 1e-6) active = true;
+        int[] findActiveFrames(int firstFrame, int lastFrame) {
+            int firstActive = -1;
+            int lastActive = -1;
+            for (int frame = firstFrame; frame <= lastFrame; frame++) {
+                boolean isActive = false;
+                for (int output = 0; output <= LAST_POWER_OUTPUT; output++) {
+                    if (Math.abs(mechanismStates[frame][output]) > 1e-6) isActive = true;
                 }
-                if (i > 0 && !sameMech(m[i], m[i - 1])) active = true;
-                if (active) {
-                    if (first < 0) first = i;
-                    last = i;
+                if (frame > 0 && !sameMechanismState(mechanismStates[frame], mechanismStates[frame - 1])) {
+                    isActive = true;
                 }
-            }
-            return first < 0 ? null : new int[]{first, last};
-        }
-
-        /** A hold at the average pose of the stop, replaying only the active part of it. */
-        Step makeDwell(int a, int b, int first, int last) {
-            double sx = 0, sy = 0, sh = 0;
-            for (int i = a; i <= b; i++) {
-                sx += x[i];
-                sy += y[i];
-                sh += h[i];
-            }
-            int cnt = b - a + 1;
-
-            List<TimedMech> timeline = new ArrayList<>();
-            double[] prev = null;
-            for (int i = first; i <= last; i++) {
-                if (prev == null || !sameMech(m[i], prev)) {
-                    timeline.add(new TimedMech(t[i] - t[first], m[i]));
-                    prev = m[i];
+                if (isActive) {
+                    if (firstActive < 0) firstActive = frame;
+                    lastActive = frame;
                 }
             }
-            // never 0: a hold of 0 seconds means "turn in place"
-            double seconds = Math.max(0.05, t[last] - t[first]);
-            return Step.hold(sx / cnt, sy / cnt, sh / cnt, m[first], seconds, timeline);
+            return firstActive < 0 ? null : new int[]{firstActive, lastActive};
         }
 
-        void dropTrailingTurn() {
-            int last = steps.size() - 1;
-            if (last >= 0 && steps.get(last).hold && steps.get(last).holdSeconds == 0) steps.remove(last);
+        /** A hold at the average position of the stop, replaying only the active part of it. */
+        RouteStep makeTimedHold(Stop stop) {
+            double sumX = 0, sumY = 0, sumHeading = 0;
+            for (int frame = stop.firstFrame; frame <= stop.lastFrame; frame++) {
+                sumX += xInches[frame];
+                sumY += yInches[frame];
+                sumHeading += headingRadians[frame];
+            }
+            int frameTotal = stop.lastFrame - stop.firstFrame + 1;
+
+            List<TimedMechanismState> timeline = new ArrayList<>();
+            double[] previousState = null;
+            for (int frame = stop.firstActiveFrame; frame <= stop.lastActiveFrame; frame++) {
+                if (previousState == null || !sameMechanismState(mechanismStates[frame], previousState)) {
+                    double secondsIntoHold = timeSeconds[frame] - timeSeconds[stop.firstActiveFrame];
+                    timeline.add(new TimedMechanismState(secondsIntoHold, mechanismStates[frame]));
+                    previousState = mechanismStates[frame];
+                }
+            }
+
+            // Never 0: a hold of 0 seconds means "turn in place".
+            double holdSeconds = Math.max(0.05,
+                    timeSeconds[stop.lastActiveFrame] - timeSeconds[stop.firstActiveFrame]);
+
+            return RouteStep.holdPosition(sumX / frameTotal, sumY / frameTotal, sumHeading / frameTotal,
+                    mechanismStates[stop.firstActiveFrame], holdSeconds, timeline);
         }
 
-        // ---- turning the moving part of the log into lines and turns ----
-        void planStretch(int s, int e) {
-            if (e <= s) return;
+        void removeTurnBeforeHold() {
+            int lastIndex = steps.size() - 1;
+            if (lastIndex >= 0 && steps.get(lastIndex).isHold && steps.get(lastIndex).holdSeconds == 0) {
+                steps.remove(lastIndex);
+            }
+        }
+
+        // ---- turning the driving parts of the recording into lines and turns ----
+
+        void planDrivingSection(int startFrame, int endFrame) {
+            if (endFrame <= startFrame) return;
 
             // Every frame where a mechanism output changed must become a waypoint,
             // so Playback can trigger it when the robot reaches that spot.
-            List<Integer> forced = new ArrayList<>();
-            forced.add(s);
-            for (int i = s + 1; i < e; i++) {
-                if (!sameMech(m[i], m[i - 1])) forced.add(i);
+            List<Integer> mustKeepFrames = new ArrayList<>();
+            mustKeepFrames.add(startFrame);
+            for (int frame = startFrame + 1; frame < endFrame; frame++) {
+                if (!sameMechanismState(mechanismStates[frame], mechanismStates[frame - 1])) {
+                    mustKeepFrames.add(frame);
+                }
             }
-            forced.add(e);
+            mustKeepFrames.add(endFrame);
 
-            List<Integer> anchors = new ArrayList<>();
-            for (int k = 0; k + 1 < forced.size(); k++) {
-                int p = forced.get(k), q = forced.get(k + 1);
-                anchors.add(p);
-                simplify(p, q, anchors);
+            // Between the must-keep frames, keep only the points needed to follow the path.
+            List<Integer> waypointFrames = new ArrayList<>();
+            for (int i = 0; i + 1 < mustKeepFrames.size(); i++) {
+                int fromFrame = mustKeepFrames.get(i);
+                int toFrame = mustKeepFrames.get(i + 1);
+                waypointFrames.add(fromFrame);
+                addImportantPointsBetween(fromFrame, toFrame, waypointFrames);
             }
-            anchors.add(e);
+            waypointFrames.add(endFrame);
 
-            int cur = anchors.get(0);
-            double[] curMech = m[cur];
-            for (int k = 1; k < anchors.size(); k++) {
-                int b = anchors.get(k);
-                double dist = Math.hypot(x[b] - x[cur], y[b] - y[cur]);
-                double dh = Math.abs(h[b] - h[cur]);
-                if (dist >= MIN_MOVE_IN) {
-                    steps.add(Step.move(x[cur], y[cur], h[cur], x[b], y[b], h[b], curMech));
-                    cur = b;
-                    curMech = m[b];
-                } else if (dh >= MIN_TURN_RAD) {
-                    steps.add(Step.hold(x[b], y[b], h[b], curMech, 0.0, new ArrayList<TimedMech>()));
-                    cur = b;
-                    curMech = m[b];
+            // Turn consecutive waypoints into drive-a-line or turn-in-place steps.
+            int currentFrame = waypointFrames.get(0);
+            double[] currentMechanismState = mechanismStates[currentFrame];
+            for (int i = 1; i < waypointFrames.size(); i++) {
+                int nextFrame = waypointFrames.get(i);
+                double distance = Math.hypot(xInches[nextFrame] - xInches[currentFrame],
+                        yInches[nextFrame] - yInches[currentFrame]);
+                double headingChange = Math.abs(headingRadians[nextFrame] - headingRadians[currentFrame]);
+
+                if (distance >= MIN_LINE_LENGTH_INCHES) {
+                    steps.add(RouteStep.driveLine(
+                            xInches[currentFrame], yInches[currentFrame], headingRadians[currentFrame],
+                            xInches[nextFrame], yInches[nextFrame], headingRadians[nextFrame],
+                            currentMechanismState));
+                    currentFrame = nextFrame;
+                    currentMechanismState = mechanismStates[nextFrame];
+                } else if (headingChange >= MIN_TURN_RADIANS) {
+                    steps.add(RouteStep.holdPosition(
+                            xInches[nextFrame], yInches[nextFrame], headingRadians[nextFrame],
+                            currentMechanismState, 0.0, new ArrayList<TimedMechanismState>()));
+                    currentFrame = nextFrame;
+                    currentMechanismState = mechanismStates[nextFrame];
                 } else {
-                    curMech = m[b]; // no real movement: just carry the mechanism state forward
+                    // No real movement: just carry the mechanism state forward.
+                    currentMechanismState = mechanismStates[nextFrame];
                 }
             }
         }
 
-        /** Ramer-Douglas-Peucker: keep only the points needed to stay within tolerance. */
-        void simplify(int p, int q, List<Integer> out) {
-            if (q - p < 2) return;
-            boolean[] keep = new boolean[q - p + 1];
-            Deque<int[]> stack = new ArrayDeque<>();
-            stack.push(new int[]{p, q});
-            while (!stack.isEmpty()) {
-                int[] r = stack.pop();
-                int lo = r[0], hi = r[1];
-                if (hi - lo < 2) continue;
+        /**
+         * Ramer-Douglas-Peucker line simplification: adds (in order) the frames strictly
+         * between fromFrame and toFrame that are needed to stay within the path tolerance.
+         */
+        void addImportantPointsBetween(int fromFrame, int toFrame, List<Integer> output) {
+            if (toFrame - fromFrame < 2) return;
 
-                int best = -1;
-                double bestDev = -1;
-                for (int i = lo + 1; i < hi; i++) {
-                    double d = deviation(lo, hi, i);
-                    if (d > bestDev) {
-                        bestDev = d;
-                        best = i;
+            boolean[] keepFrame = new boolean[toFrame - fromFrame + 1];
+            Deque<int[]> rangesToCheck = new ArrayDeque<>();
+            rangesToCheck.push(new int[]{fromFrame, toFrame});
+
+            while (!rangesToCheck.isEmpty()) {
+                int[] range = rangesToCheck.pop();
+                int rangeStart = range[0];
+                int rangeEnd = range[1];
+                if (rangeEnd - rangeStart < 2) continue;
+
+                int farthestFrame = -1;
+                double farthestDistance = -1;
+                for (int frame = rangeStart + 1; frame < rangeEnd; frame++) {
+                    double distance = distanceFromLine(rangeStart, rangeEnd, frame);
+                    if (distance > farthestDistance) {
+                        farthestDistance = distance;
+                        farthestFrame = frame;
                     }
                 }
-                double len = Math.hypot(x[hi] - x[lo], y[hi] - y[lo]);
-                boolean headingTooBig = len >= MIN_MOVE_IN && Math.abs(h[hi] - h[lo]) > MAX_STEP_HEADING_RAD;
-                if (bestDev <= PATH_TOLERANCE_IN && !headingTooBig) continue;
 
-                if (bestDev < 1e-9) best = (lo + hi) / 2;
-                keep[best - p] = true;
-                stack.push(new int[]{lo, best});
-                stack.push(new int[]{best, hi});
+                double lineLength = Math.hypot(xInches[rangeEnd] - xInches[rangeStart],
+                        yInches[rangeEnd] - yInches[rangeStart]);
+                boolean headingChangeTooLarge = lineLength >= MIN_LINE_LENGTH_INCHES
+                        && Math.abs(headingRadians[rangeEnd] - headingRadians[rangeStart])
+                        > MAX_HEADING_CHANGE_PER_LINE_RADIANS;
+                if (farthestDistance <= PATH_TOLERANCE_INCHES && !headingChangeTooLarge) continue;
+
+                if (farthestDistance < 1e-9) farthestFrame = (rangeStart + rangeEnd) / 2;
+                keepFrame[farthestFrame - fromFrame] = true;
+                rangesToCheck.push(new int[]{rangeStart, farthestFrame});
+                rangesToCheck.push(new int[]{farthestFrame, rangeEnd});
             }
-            for (int i = p + 1; i < q; i++) if (keep[i - p]) out.add(i);
+
+            for (int frame = fromFrame + 1; frame < toFrame; frame++) {
+                if (keepFrame[frame - fromFrame]) output.add(frame);
+            }
         }
 
-        /** How far frame i is from the straight line lo->hi, mixing position and heading error. */
-        double deviation(int lo, int hi, int i) {
-            double ax = x[lo], ay = y[lo];
-            double dx = x[hi] - ax, dy = y[hi] - ay;
-            double len2 = dx * dx + dy * dy;
+        /**
+         * How far a frame is from the straight line between two other frames, combining
+         * position error (inches) and heading error (converted to inches).
+         */
+        double distanceFromLine(int lineStartFrame, int lineEndFrame, int frame) {
+            double lineStartX = xInches[lineStartFrame];
+            double lineStartY = yInches[lineStartFrame];
+            double lineDx = xInches[lineEndFrame] - lineStartX;
+            double lineDy = yInches[lineEndFrame] - lineStartY;
+            double lineLengthSquared = lineDx * lineDx + lineDy * lineDy;
 
-            double s = 0;
-            if (len2 > 1e-9) {
-                s = ((x[i] - ax) * dx + (y[i] - ay) * dy) / len2;
-                s = Math.max(0, Math.min(1, s));
+            // How far along the line (0 = start, 1 = end) is the closest point to this frame?
+            double fractionAlongLine = 0;
+            if (lineLengthSquared > 1e-9) {
+                fractionAlongLine = ((xInches[frame] - lineStartX) * lineDx
+                        + (yInches[frame] - lineStartY) * lineDy) / lineLengthSquared;
+                fractionAlongLine = Math.max(0, Math.min(1, fractionAlongLine));
             }
-            double perp = Math.hypot(x[i] - (ax + s * dx), y[i] - (ay + s * dy));
+            double sidewaysDistance = Math.hypot(
+                    xInches[frame] - (lineStartX + fractionAlongLine * lineDx),
+                    yInches[frame] - (lineStartY + fractionAlongLine * lineDy));
 
-            // Heading only matters along a real line. If the endpoints are the same spot
-            // the robot is turning in place and only the final heading counts.
-            double headingTerm = 0;
-            if (len2 >= MIN_MOVE_IN * MIN_MOVE_IN) {
-                double expected = h[lo] + s * (h[hi] - h[lo]);
-                headingTerm = Math.abs(h[i] - expected) * (PATH_TOLERANCE_IN / HEADING_TOL_RAD);
+            // Heading only matters along a real line. If both ends are the same spot, the
+            // robot is turning in place and only the final heading counts.
+            double headingErrorInInches = 0;
+            if (lineLengthSquared >= MIN_LINE_LENGTH_INCHES * MIN_LINE_LENGTH_INCHES) {
+                double expectedHeading = headingRadians[lineStartFrame] + fractionAlongLine
+                        * (headingRadians[lineEndFrame] - headingRadians[lineStartFrame]);
+                headingErrorInInches = Math.abs(headingRadians[frame] - expectedHeading)
+                        * (PATH_TOLERANCE_INCHES / HEADING_TOLERANCE_RADIANS);
             }
-            return Math.max(perp, headingTerm);
+            return Math.max(sidewaysDistance, headingErrorInInches);
         }
     }
 }
