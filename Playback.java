@@ -17,46 +17,49 @@ import java.util.List;
  * Replays a route recorded with "Record Route (30s)".
  *
  * Instead of repeating stick inputs, the robot drives to the POSITIONS you drove
- * through (using the Pinpoint + Pedro follower), so it corrects for slip, battery
- * and bumps. Mechanisms fire when the robot reaches the spot where you used them,
- * and when you stopped to shoot, it holds that spot and replays your timing.
+ * through (using the Pinpoint and the Pedro follower), so it corrects for slip,
+ * battery changes and bumps. Mechanisms fire when the robot reaches the spot where
+ * you used them. When you stopped to shoot, the robot holds that spot, waits until
+ * it is in position, and then replays your timing.
  *
- * Place the robot at the same start pose you used when recording.
+ * Place the robot at the same start position you used when recording.
  */
 @Autonomous(name = "Playback Recorded Route", group = "Record")
 public class Playback extends LinearOpMode {
 
     /**
-     * On straight-through waypoints, move on to the next line when the robot is
-     * within this many inches (so it doesn't stop at every waypoint).
-     * Set to 0 to make it fully stop and settle at every waypoint.
+     * When one line leads straight into another, start the next line once the robot
+     * is within this many inches of the end of the current one (so it doesn't stop at
+     * every waypoint). Set to 0 to make it fully stop and settle at every waypoint.
      */
-    private static final double ADVANCE_RADIUS_IN = 3.0;
+    private static final double START_NEXT_LINE_WITHIN_INCHES = 3.0;
 
-    /** The robot counts as "in position" within these tolerances ... */
-    private static final double SETTLE_POS_IN = 1.0;
-    private static final double SETTLE_HEADING_DEG = 3.0;
-    /** ... or after this long, so one stubborn spot can't eat the whole autonomous. */
-    private static final double SETTLE_TIMEOUT_S = 1.5;
+    /** The robot counts as "in position" when it is this close to its target ... */
+    private static final double IN_POSITION_TOLERANCE_INCHES = 1.0;
+    private static final double IN_POSITION_TOLERANCE_DEGREES = 3.0;
+    /** ... or after waiting this long, so one stubborn spot can't use up the whole autonomous. */
+    private static final double IN_POSITION_TIMEOUT_SECONDS = 1.5;
 
     private Follower follower;
-    private Mechanisms mech;
+    private Mechanisms mechanisms;
 
+    /** Time since the current step began. */
     private final ElapsedTime stepTimer = new ElapsedTime();
-    private int timelineIndex = -1;
-    /** For timed holds: stepTimer reading when the robot settled (-1 = not yet). */
-    private double settledAt = -1;
+    /** Which entry of a hold's mechanism timeline was applied last (-1 = none yet). */
+    private int timelineEntryIndex = -1;
+    /** For timed holds: stepTimer reading when the robot got in position (-1 = not yet). */
+    private double settledAtSeconds = -1;
 
     @Override
     public void runOpMode() {
         follower = Constants.create(hardwareMap);
-        mech = new Mechanisms(hardwareMap);
+        mechanisms = new Mechanisms(hardwareMap);
 
-        RouteData.Recording rec;
-        List<RouteData.Step> steps;
+        RouteData.Recording recording;
+        List<RouteData.RouteStep> routeSteps;
         try {
-            rec = RouteData.load();
-            steps = RouteData.plan(rec.frames);
+            recording = RouteData.load();
+            routeSteps = RouteData.planRoute(recording.frames);
         } catch (IOException e) {
             telemetry.addData("ERROR", "Could not load route: " + e.getMessage());
             telemetry.addData("Fix", "Run \"Record Route (30s)\" first");
@@ -65,109 +68,130 @@ public class Playback extends LinearOpMode {
             return;
         }
 
-        Pose startPose = new Pose(rec.startX, rec.startY, rec.startH);
+        Pose startPose = new Pose(recording.startXInches, recording.startYInches,
+                recording.startHeadingRadians);
         follower.setPose(startPose);
         follower.update();
 
-        telemetry.addData("Status", "Loaded %d frames -> %d steps", rec.frames.size(), steps.size());
+        telemetry.addData("Status", "Loaded %d frames -> %d steps",
+                recording.frames.size(), routeSteps.size());
         telemetry.addData("Place robot at", "x=%.1f y=%.1f heading=%.0f deg",
-                rec.startX, rec.startY, Math.toDegrees(rec.startH));
-        for (int i = 0; i < Math.min(steps.size(), 8); i++) {
-            telemetry.addData("Step " + (i + 1), steps.get(i).toString());
+                recording.startXInches, recording.startYInches,
+                Math.toDegrees(recording.startHeadingRadians));
+        for (int i = 0; i < Math.min(routeSteps.size(), 8); i++) {
+            telemetry.addData("Step " + (i + 1), routeSteps.get(i).toString());
         }
         telemetry.update();
 
         waitForStart();
-        if (steps.isEmpty()) return;
+        if (routeSteps.isEmpty()) return;
 
         follower.setPose(startPose);
         follower.update();
 
-        // Shooter power compensates for a different battery than when you recorded
-        double scale = rec.voltage / Mechanisms.batteryVoltage(hardwareMap);
-        mech.setShooterScale(Math.max(0.8, Math.min(scale, 1.25)));
+        // Shooter power makes up for a different battery than when you recorded
+        double batteryRatio = recording.batteryVoltage / Mechanisms.readBatteryVoltage(hardwareMap);
+        mechanisms.setShooterPowerMultiplier(Math.max(0.8, Math.min(batteryRatio, 1.25)));
 
-        int i = 0;
-        beginStep(steps.get(i));
-        ElapsedTime uiTimer = new ElapsedTime();
+        int currentStepIndex = 0;
+        beginStep(routeSteps.get(currentStepIndex));
+        ElapsedTime telemetryTimer = new ElapsedTime();
 
-        while (opModeIsActive() && i < steps.size()) {
+        while (opModeIsActive() && currentStepIndex < routeSteps.size()) {
             follower.update(); // as often as possible, no sleep
 
-            RouteData.Step current = steps.get(i);
-            RouteData.Step next = i + 1 < steps.size() ? steps.get(i + 1) : null;
+            RouteData.RouteStep currentStep = routeSteps.get(currentStepIndex);
+            RouteData.RouteStep nextStep = (currentStepIndex + 1 < routeSteps.size())
+                    ? routeSteps.get(currentStepIndex + 1)
+                    : null;
 
-            if (isDone(current, next)) {
-                i++;
-                if (i < steps.size()) beginStep(steps.get(i));
+            if (isStepFinished(currentStep, nextStep)) {
+                currentStepIndex++;
+                if (currentStepIndex < routeSteps.size()) beginStep(routeSteps.get(currentStepIndex));
             }
 
-            if (uiTimer.milliseconds() > 100) {
-                Pose p = follower.pose();
-                telemetry.addData("Step", "%d / %d", Math.min(i + 1, steps.size()), steps.size());
-                telemetry.addData("Pose", "x=%.1f y=%.1f h=%.0f deg", p.x(), p.y(), Math.toDegrees(p.heading()));
-                if (i < steps.size()) telemetry.addData("Doing", steps.get(i).toString());
+            if (telemetryTimer.milliseconds() > 100) {
+                Pose robotPose = follower.pose();
+                telemetry.addData("Step", "%d / %d",
+                        Math.min(currentStepIndex + 1, routeSteps.size()), routeSteps.size());
+                telemetry.addData("Position", "x=%.1f y=%.1f heading=%.0f deg",
+                        robotPose.x(), robotPose.y(), Math.toDegrees(robotPose.heading()));
+                if (currentStepIndex < routeSteps.size()) {
+                    telemetry.addData("Doing", routeSteps.get(currentStepIndex).toString());
+                }
                 telemetry.update();
-                uiTimer.reset();
+                telemetryTimer.reset();
             }
         }
 
-        mech.stop();
+        mechanisms.stopAllMotion();
     }
 
-    /** Start a step: apply its mechanism state, then send the follower where it needs to go. */
-    private void beginStep(RouteData.Step s) {
+    /** Start a step: apply its mechanism state, then tell the follower where to go. */
+    private void beginStep(RouteData.RouteStep step) {
         stepTimer.reset();
-        timelineIndex = -1;
-        settledAt = -1;
-        // A timed hold starts its mechanisms only once the robot is in position
-        if (!(s.hold && s.holdSeconds > 0)) mech.apply(s.mech);
+        timelineEntryIndex = -1;
+        settledAtSeconds = -1;
 
-        if (s.hold) {
-            follower.hold(new Pose(s.x, s.y, s.h));
+        // A timed hold starts its mechanisms only once the robot is in position.
+        boolean isTimedHold = step.isHold && step.holdSeconds > 0;
+        if (!isTimedHold) mechanisms.sendToHardware(step.mechanismStateAtStart);
+
+        if (step.isHold) {
+            follower.hold(new Pose(step.targetX, step.targetY, step.targetHeading));
         } else {
-            Pose from = new Pose(s.fx, s.fy, s.fh);
-            Pose to = new Pose(s.x, s.y, s.h);
-            Path path = Paths.line(from, to).linear(from, to);
-            follower.follow(path);
+            Pose lineStart = new Pose(step.startX, step.startY, step.startHeading);
+            Pose lineEnd = new Pose(step.targetX, step.targetY, step.targetHeading);
+            Path line = Paths.line(lineStart, lineEnd).linear(lineStart, lineEnd);
+            follower.follow(line);
         }
     }
 
-    private boolean isDone(RouteData.Step s, RouteData.Step next) {
-        double elapsed = stepTimer.seconds();
-        Pose p = follower.pose();
+    private boolean isStepFinished(RouteData.RouteStep step, RouteData.RouteStep nextStep) {
+        double secondsInStep = stepTimer.seconds();
+        Pose robotPose = follower.pose();
 
-        if (s.hold) {
-            boolean inPosition = Math.hypot(p.x() - s.x, p.y() - s.y) <= SETTLE_POS_IN
-                    && Math.abs(RouteData.normalize(p.heading() - s.h)) <= Math.toRadians(SETTLE_HEADING_DEG);
-            boolean gaveUp = elapsed >= SETTLE_TIMEOUT_S;
+        if (step.isHold) {
+            double distanceToTarget = Math.hypot(robotPose.x() - step.targetX, robotPose.y() - step.targetY);
+            double headingError = Math.abs(RouteData.normalizeAngle(robotPose.heading() - step.targetHeading));
+            boolean isInPosition = distanceToTarget <= IN_POSITION_TOLERANCE_INCHES
+                    && headingError <= Math.toRadians(IN_POSITION_TOLERANCE_DEGREES);
+            boolean waitedTooLong = secondsInStep >= IN_POSITION_TIMEOUT_SECONDS;
 
-            if (s.holdSeconds <= 0) {
-                return inPosition || gaveUp; // turn in place: done once settled
+            if (step.holdSeconds <= 0) {
+                return isInPosition || waitedTooLong; // turn in place: done once in position
             }
 
-            // Timed hold (e.g. shooting): wait until in position, THEN replay your timing
-            if (settledAt < 0) {
-                if (!(inPosition || gaveUp)) return false;
-                settledAt = elapsed;
+            // Timed hold (for example, shooting): wait until in position, THEN replay your timing.
+            if (settledAtSeconds < 0) {
+                if (!(isInPosition || waitedTooLong)) return false;
+                settledAtSeconds = secondsInStep;
             }
-            double sinceSettled = elapsed - settledAt;
-            applyTimeline(s, sinceSettled);
-            return sinceSettled >= s.holdSeconds;
+            double secondsSinceSettled = secondsInStep - settledAtSeconds;
+            applyMechanismTimeline(step, secondsSinceSettled);
+            return secondsSinceSettled >= step.holdSeconds;
         }
 
-        // MOVE
-        boolean keepRolling = next != null && !next.hold;
-        double dist = Math.hypot(p.x() - s.x, p.y() - s.y);
-        if (keepRolling && ADVANCE_RADIUS_IN > 0 && dist <= ADVANCE_RADIUS_IN) return true;
-        return follower.atParametricEnd() || elapsed >= s.timeoutSeconds();
+        // Driving a line
+        boolean continueWithoutStopping = nextStep != null && !nextStep.isHold;
+        double distanceToLineEnd = Math.hypot(robotPose.x() - step.targetX, robotPose.y() - step.targetY);
+        if (continueWithoutStopping && START_NEXT_LINE_WITHIN_INCHES > 0
+                && distanceToLineEnd <= START_NEXT_LINE_WITHIN_INCHES) {
+            return true;
+        }
+        return follower.atParametricEnd() || secondsInStep >= step.timeoutSeconds();
     }
 
-    /** During a hold, replay mechanism changes at the same offsets they happened in the recording. */
-    private void applyTimeline(RouteData.Step s, double elapsed) {
-        int idx = timelineIndex;
-        while (idx + 1 < s.timeline.size() && s.timeline.get(idx + 1).offset <= elapsed) idx++;
-        if (idx >= 0 && idx != timelineIndex) mech.apply(s.timeline.get(idx).mech);
-        timelineIndex = idx;
+    /** During a hold, replay mechanism changes at the same times they happened in the recording. */
+    private void applyMechanismTimeline(RouteData.RouteStep step, double secondsSinceSettled) {
+        int latestEntryIndex = timelineEntryIndex;
+        while (latestEntryIndex + 1 < step.mechanismTimeline.size()
+                && step.mechanismTimeline.get(latestEntryIndex + 1).secondsIntoHold <= secondsSinceSettled) {
+            latestEntryIndex++;
+        }
+        if (latestEntryIndex >= 0 && latestEntryIndex != timelineEntryIndex) {
+            mechanisms.sendToHardware(step.mechanismTimeline.get(latestEntryIndex).mechanismState);
+        }
+        timelineEntryIndex = latestEntryIndex;
     }
 }
