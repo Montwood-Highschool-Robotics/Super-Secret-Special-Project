@@ -1,15 +1,15 @@
 package org.firstinspires.ftc.teamcode;
 
-import static org.firstinspires.ftc.teamcode.RouteData.ANGLE1;
-import static org.firstinspires.ftc.teamcode.RouteData.ANGLE2;
-import static org.firstinspires.ftc.teamcode.RouteData.FLOWER_L;
-import static org.firstinspires.ftc.teamcode.RouteData.FLOWER_R;
+import static org.firstinspires.ftc.teamcode.RouteData.ANGLE_SERVO_1;
+import static org.firstinspires.ftc.teamcode.RouteData.ANGLE_SERVO_2;
+import static org.firstinspires.ftc.teamcode.RouteData.FLOWER_LEFT;
+import static org.firstinspires.ftc.teamcode.RouteData.FLOWER_RIGHT;
 import static org.firstinspires.ftc.teamcode.RouteData.INTAKE;
-import static org.firstinspires.ftc.teamcode.RouteData.L_SHOOT;
-import static org.firstinspires.ftc.teamcode.RouteData.MECH_COUNT;
-import static org.firstinspires.ftc.teamcode.RouteData.R_SHOOT;
+import static org.firstinspires.ftc.teamcode.RouteData.LEFT_SHOOTER;
+import static org.firstinspires.ftc.teamcode.RouteData.MECHANISM_COUNT;
+import static org.firstinspires.ftc.teamcode.RouteData.RIGHT_SHOOTER;
 import static org.firstinspires.ftc.teamcode.RouteData.STOPPER;
-import static org.firstinspires.ftc.teamcode.RouteData.THIS_ONE_2;
+import static org.firstinspires.ftc.teamcode.RouteData.STOPPER_PARTNER;
 
 import com.qualcomm.robotcore.hardware.CRServo;
 import com.qualcomm.robotcore.hardware.DcMotor;
@@ -19,127 +19,130 @@ import com.qualcomm.robotcore.hardware.Servo;
 import com.qualcomm.robotcore.hardware.VoltageSensor;
 
 /**
- * The non-drive hardware (shooter, intake, stopper, servos).
+ * The non-drive hardware: shooter, intake, stopper and servos.
  *
- * readGamepad() uses the SAME controls as your real TeleOp (RandomBS3Conglomerate),
- * so what you record is exactly what you normally drive with.
- * apply() sends a recorded state to the hardware during playback.
+ * A "state" is an array with one number per output (see RouteData for the layout).
+ *
+ * updateStateFromGamepad() uses the SAME controls as your real TeleOp
+ * (RandomBS3Conglomerate), so what you record is exactly what you normally drive with.
+ * sendToHardware() applies a recorded state to the robot during playback.
  */
 public class Mechanisms {
-    private final DcMotor leftShoot, rightShoot, intake;
-    private final Servo angle1, angle2, flowerR, flowerL;
-    private final CRServo stopper, thisOne2;
+    private final DcMotor leftShooterMotor, rightShooterMotor, intakeMotor;
+    private final Servo angleServo1, angleServo2, flowerServoRight, flowerServoLeft;
+    private final CRServo stopperServo, stopperPartnerServo;
 
-    /** Multiplier for shooter power (compensates for a different battery voltage). */
-    private double shooterScale = 1.0;
+    /** Multiplier for shooter power (makes up for a different battery voltage). */
+    private double shooterPowerMultiplier = 1.0;
 
-    public Mechanisms(HardwareMap hw) {
-        leftShoot = hw.dcMotor.get("LeftShoot");
-        rightShoot = hw.dcMotor.get("RightShoot");
-        intake = hw.dcMotor.get("Intake");
-        angle1 = hw.servo.get("Angle1");
-        angle2 = hw.servo.get("Angle2");
-        flowerR = hw.servo.get("FlowerR");
-        flowerL = hw.servo.get("FlowerL");
-        stopper = hw.crservo.get("Stopper");
-        thisOne2 = hw.crservo.get("ThisOne2");
+    public Mechanisms(HardwareMap hardwareMap) {
+        leftShooterMotor = hardwareMap.dcMotor.get("LeftShoot");
+        rightShooterMotor = hardwareMap.dcMotor.get("RightShoot");
+        intakeMotor = hardwareMap.dcMotor.get("Intake");
+        angleServo1 = hardwareMap.servo.get("Angle1");
+        angleServo2 = hardwareMap.servo.get("Angle2");
+        flowerServoRight = hardwareMap.servo.get("FlowerR");
+        flowerServoLeft = hardwareMap.servo.get("FlowerL");
+        stopperServo = hardwareMap.crservo.get("Stopper");
+        stopperPartnerServo = hardwareMap.crservo.get("ThisOne2");
     }
 
-    public void setShooterScale(double scale) {
-        shooterScale = scale;
+    public void setShooterPowerMultiplier(double multiplier) {
+        shooterPowerMultiplier = multiplier;
     }
 
     /** A fresh state: all powers 0, all servo positions "not commanded yet" (NaN). */
-    public static double[] newState() {
-        double[] s = new double[MECH_COUNT];
-        s[ANGLE1] = Double.NaN;
-        s[ANGLE2] = Double.NaN;
-        s[FLOWER_R] = Double.NaN;
-        s[FLOWER_L] = Double.NaN;
-        return s;
+    public static double[] newEmptyState() {
+        double[] state = new double[MECHANISM_COUNT];
+        state[ANGLE_SERVO_1] = Double.NaN;
+        state[ANGLE_SERVO_2] = Double.NaN;
+        state[FLOWER_RIGHT] = Double.NaN;
+        state[FLOWER_LEFT] = Double.NaN;
+        return state;
     }
 
     /**
      * Update a state from gamepad2. Motor powers are rewritten every call; servo
-     * positions only change when their button is pressed (they hold otherwise).
+     * positions only change when their button is pressed (otherwise they hold).
      */
-    public static void readGamepad(Gamepad g, double[] s) {
+    public static void updateStateFromGamepad(Gamepad gamepad, double[] state) {
         // Shooter
-        double shoot = g.dpad_up ? 0.5 : (g.dpad_down ? -0.5 : 0.0);
-        s[L_SHOOT] = shoot;
-        s[R_SHOOT] = shoot;
+        double shooterPower = gamepad.dpad_up ? 0.5 : (gamepad.dpad_down ? -0.5 : 0.0);
+        state[LEFT_SHOOTER] = shooterPower;
+        state[RIGHT_SHOOTER] = shooterPower;
 
         // Intake
-        s[INTAKE] = g.triangle ? -1.0 : (g.square ? 1.0 : 0.0);
+        state[INTAKE] = gamepad.triangle ? -1.0 : (gamepad.square ? 1.0 : 0.0);
 
-        // Stopper + its partner servo
-        if (g.circle) {
-            s[STOPPER] = 1.0;
-            s[THIS_ONE_2] = -1.0;
-        } else if (g.cross) {
-            s[STOPPER] = -1.0;
-            s[THIS_ONE_2] = 1.0;
+        // Stopper and its partner servo (they always move in opposite directions)
+        if (gamepad.circle) {
+            state[STOPPER] = 1.0;
+            state[STOPPER_PARTNER] = -1.0;
+        } else if (gamepad.cross) {
+            state[STOPPER] = -1.0;
+            state[STOPPER_PARTNER] = 1.0;
         } else {
-            s[STOPPER] = 0.0;
-            s[THIS_ONE_2] = 0.0;
+            state[STOPPER] = 0.0;
+            state[STOPPER_PARTNER] = 0.0;
         }
 
-        // Angle
-        if (g.right_bumper) {
-            s[ANGLE1] = 0.5;
-            s[ANGLE2] = 0.0;
-        } else if (g.left_bumper) {
-            s[ANGLE1] = 0.0;
-            s[ANGLE2] = 0.5;
+        // Angle servos
+        if (gamepad.right_bumper) {
+            state[ANGLE_SERVO_1] = 0.5;
+            state[ANGLE_SERVO_2] = 0.0;
+        } else if (gamepad.left_bumper) {
+            state[ANGLE_SERVO_1] = 0.0;
+            state[ANGLE_SERVO_2] = 0.5;
         }
 
-        // Flower ramp
-        if (g.right_trigger > 0.1) {
-            s[FLOWER_R] = 1.0;
-            s[FLOWER_L] = 0.0;
-        } else if (g.left_trigger > 0.1) {
-            s[FLOWER_R] = 0.0;
-            s[FLOWER_L] = 1.0;
+        // Flower ramp servos
+        if (gamepad.right_trigger > 0.1) {
+            state[FLOWER_RIGHT] = 1.0;
+            state[FLOWER_LEFT] = 0.0;
+        } else if (gamepad.left_trigger > 0.1) {
+            state[FLOWER_RIGHT] = 0.0;
+            state[FLOWER_LEFT] = 1.0;
         }
     }
 
     /** Send a state to the hardware. */
-    public void apply(double[] s) {
-        leftShoot.setPower(clip(s[L_SHOOT] * shooterScale));
-        rightShoot.setPower(clip(s[R_SHOOT] * shooterScale));
-        intake.setPower(s[INTAKE]);
-        stopper.setPower(s[STOPPER]);
-        thisOne2.setPower(s[THIS_ONE_2]);
-        setServo(angle1, s[ANGLE1]);
-        setServo(angle2, s[ANGLE2]);
-        setServo(flowerR, s[FLOWER_R]);
-        setServo(flowerL, s[FLOWER_L]);
+    public void sendToHardware(double[] state) {
+        leftShooterMotor.setPower(limitToPlusMinusOne(state[LEFT_SHOOTER] * shooterPowerMultiplier));
+        rightShooterMotor.setPower(limitToPlusMinusOne(state[RIGHT_SHOOTER] * shooterPowerMultiplier));
+        intakeMotor.setPower(state[INTAKE]);
+        stopperServo.setPower(state[STOPPER]);
+        stopperPartnerServo.setPower(state[STOPPER_PARTNER]);
+        setServoIfCommanded(angleServo1, state[ANGLE_SERVO_1]);
+        setServoIfCommanded(angleServo2, state[ANGLE_SERVO_2]);
+        setServoIfCommanded(flowerServoRight, state[FLOWER_RIGHT]);
+        setServoIfCommanded(flowerServoLeft, state[FLOWER_LEFT]);
     }
 
     /** Stop everything that spins (servos stay where they are). */
-    public void stop() {
-        leftShoot.setPower(0);
-        rightShoot.setPower(0);
-        intake.setPower(0);
-        stopper.setPower(0);
-        thisOne2.setPower(0);
+    public void stopAllMotion() {
+        leftShooterMotor.setPower(0);
+        rightShooterMotor.setPower(0);
+        intakeMotor.setPower(0);
+        stopperServo.setPower(0);
+        stopperPartnerServo.setPower(0);
     }
 
-    /** Lowest battery voltage reported by any hub (12.0 if none is readable). */
-    public static double batteryVoltage(HardwareMap hw) {
-        double result = Double.POSITIVE_INFINITY;
-        for (VoltageSensor sensor : hw.voltageSensor) {
-            double v = sensor.getVoltage();
-            if (v > 0) result = Math.min(result, v);
+    /** Lowest battery voltage reported by any hub (12.0 if none can be read). */
+    public static double readBatteryVoltage(HardwareMap hardwareMap) {
+        double lowestVoltage = Double.POSITIVE_INFINITY;
+        for (VoltageSensor sensor : hardwareMap.voltageSensor) {
+            double voltage = sensor.getVoltage();
+            if (voltage > 0) lowestVoltage = Math.min(lowestVoltage, voltage);
         }
-        return result == Double.POSITIVE_INFINITY ? 12.0 : result;
+        return lowestVoltage == Double.POSITIVE_INFINITY ? 12.0 : lowestVoltage;
     }
 
-    private static void setServo(Servo s, double pos) {
-        if (!Double.isNaN(pos)) s.setPosition(pos);
+    /** NaN means "never commanded during recording", so the servo is left alone. */
+    private static void setServoIfCommanded(Servo servo, double position) {
+        if (!Double.isNaN(position)) servo.setPosition(position);
     }
 
-    private static double clip(double p) {
-        return Math.max(-1.0, Math.min(1.0, p));
+    private static double limitToPlusMinusOne(double power) {
+        return Math.max(-1.0, Math.min(1.0, power));
     }
 }
